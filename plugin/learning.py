@@ -38,7 +38,7 @@ class LearningStore:
         self._store = store
         self._embed = embed_fn
         self._config = config
-        self._main_collection = store._collection
+        self._main_collection = store.collection
         self._collection = f"{self._main_collection}_learnings"
         self._vector_dim = int(config.get("vector_size", 2048))
         self._pending_candidates: dict[str, dict] = {}  # {candidate_id: candidate}

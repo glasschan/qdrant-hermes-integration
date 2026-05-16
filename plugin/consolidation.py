@@ -39,7 +39,7 @@ class ConsolidationEngine:
         self._store = store
         self._embed = embed_fn
         self._learning = learning_store
-        self._collection = store._collection
+        self._collection = store.collection
 
     def consolidate(
         self,

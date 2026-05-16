@@ -104,7 +104,7 @@ class FileIndexer:
         self._store = store
         self._embed = embed_fn
         self._config = config
-        self._collection = store._collection
+        self._collection = store.collection
 
         # Configurable
         self._extensions: set[str] = DEFAULT_EXTENSIONS.copy()
