@@ -27,6 +27,8 @@ from urllib.parse import urljoin
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
+from plugin.indexer import FileIndexer
+
 logger = logging.getLogger(__name__)
 
 VECTOR_DIM = 2048
@@ -161,6 +163,35 @@ FORGET_SCHEMA = {
             },
         },
         "required": ["point_id"],
+    },
+}
+
+INDEX_SCHEMA = {
+    "name": "qdrant_index",
+    "description": (
+        "Safely index markdown/text files or directories into Qdrant memory. "
+        "Dry-run defaults to true — always preview first. "
+        "Supports manifest sync: detects changed and deleted files."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files or directories to index.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "When true (default), preview chunks without upserting.",
+            },
+            "max_files": {
+                "type": "integer",
+                "description": "Max files to scan (default: 500).",
+                "minimum": 1,
+            },
+        },
+        "required": ["paths"],
     },
 }
 
@@ -347,6 +378,7 @@ class QdrantMemoryProvider(MemoryProvider):
     def __init__(self):
         self._config = None
         self._store: Optional[_QdrantStore] = None
+        self._indexer: Optional[FileIndexer] = None
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._session_id = ""
@@ -379,6 +411,11 @@ class QdrantMemoryProvider(MemoryProvider):
         self._agent_id = self._config.get("agent_id", "hermes")
         self._session_id = session_id
         self._store = _QdrantStore(self._config)
+        self._indexer = FileIndexer(
+            self._store,
+            embed_fn=lambda texts: _embed(texts, self._config),
+            config=self._config,
+        )
 
     def shutdown(self) -> None:
         if self._store:
@@ -489,7 +526,7 @@ class QdrantMemoryProvider(MemoryProvider):
     # ── Tools ─────────────────────────────────────────────────────────────
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA]
+        return [PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, INDEX_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -567,6 +604,25 @@ class QdrantMemoryProvider(MemoryProvider):
                 if ok:
                     return json.dumps({"result": "Memory deleted.", "id": point_id})
                 return json.dumps({"result": "Memory not found or already deleted."})
+
+            elif tool_name == "qdrant_index":
+                if not self._indexer:
+                    return tool_error("Indexer not initialized")
+                paths = args.get("paths", [])
+                if not paths:
+                    return tool_error("Missing required parameter: paths")
+                dry_run = args.get("dry_run", True)
+                max_files = args.get("max_files")
+
+                result = self._indexer.index(
+                    paths=paths,
+                    dry_run=dry_run,
+                    max_files=max_files,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                )
+                self._record_success()
+                return json.dumps(result)
 
             return tool_error(f"Unknown tool: {tool_name}")
 
