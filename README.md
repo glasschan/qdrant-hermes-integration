@@ -7,7 +7,7 @@ Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/Nou
 ## ⚡ One-Liner Install
 
 ```bash
-curl -sL https://raw.githubusercontent.com/YOUR_USER/hermes-qdrant-integration/main/setup.sh | bash
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash
 ```
 
 Or manual:
@@ -72,7 +72,7 @@ From this repo:
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USER/hermes-qdrant-integration.git
+git clone https://github.com/glasschan/qdrant-hermes-integration.git
 cd hermes-qdrant-integration
 
 # Run setup (interactive)
@@ -88,7 +88,7 @@ From a remote Hermes (user downloads your repo):
 
 ```bash
 # Their machine
-curl -sL https://raw.githubusercontent.com/YOUR_USER/hermes-qdrant-integration/main/setup.sh | bash
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash
 ```
 
 ## 🧪 Verification
