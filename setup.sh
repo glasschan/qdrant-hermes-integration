@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "╔══════════════════════════════════════════╗"
-echo "║  Hermes Qdrant Memory — Lego Plugin v2  ║"
+echo "║  Hermes Qdrant Memory — Lego Plugin v0.1  ║"
 echo "║  10 tools · 9 modules · 1 command       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""

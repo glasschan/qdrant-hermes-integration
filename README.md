@@ -1,4 +1,4 @@
-# Hermes Qdrant Memory — Lego Plugin v2
+# Hermes Qdrant Memory — Lego Plugin v0.1.0
 
 > **10 tools · 9 modules · 1 command · ~400 lines each**
 
