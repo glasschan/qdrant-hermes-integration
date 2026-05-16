@@ -28,6 +28,7 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
 from plugin.indexer import FileIndexer
+from plugin.learning import LearningStore
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,67 @@ INDEX_SCHEMA = {
             },
         },
         "required": ["paths"],
+    },
+}
+
+LEARNING_STORE_SCHEMA = {
+    "name": "qdrant_learning_store",
+    "description": (
+        "Store an explicit procedural learning in the separate Qdrant learning collection. "
+        "Manual/gated only — not automatic."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lesson": {"type": "string", "description": "The durable lesson/procedure learned."},
+            "learning_type": {
+                "type": "string",
+                "description": "tool_failure_lesson, user_correction, workflow_lesson, or environment_quirk.",
+            },
+            "trigger": {"type": "string", "description": "Situation that should trigger recall."},
+            "mistake": {"type": "string", "description": "What went wrong."},
+            "correction": {"type": "string", "description": "The corrected action."},
+            "evidence": {"type": "string", "description": "Evidence supporting the lesson."},
+            "tool_name": {"type": "string", "description": "Tool involved, if any."},
+            "importance": {"type": "integer", "description": "Importance 1-10 (default: 7).", "minimum": 1, "maximum": 10},
+            "confidence": {"type": "number", "description": "Confidence 0-1 (default: 0.8).", "minimum": 0, "maximum": 1},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags."},
+            "promote_to_skill": {"type": "boolean", "description": "Mark as skill promotion candidate."},
+        },
+        "required": ["lesson"],
+    },
+}
+
+LEARNING_SEARCH_SCHEMA = {
+    "name": "qdrant_learning_search",
+    "description": "Search procedural learnings from the separate Qdrant learning collection.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "top_k": {"type": "integer", "description": "Max results (default: 5, max: 20)."},
+            "learning_type": {"type": "string", "description": "Optional filter by learning_type."},
+        },
+        "required": ["query"],
+    },
+}
+
+LEARNING_PREVIEW_SCHEMA = {
+    "name": "qdrant_learning_preview",
+    "description": "Preview pending gated learning candidates. Dry-run only — never writes.",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+LEARNING_APPROVE_SCHEMA = {
+    "name": "qdrant_learning_approve",
+    "description": "Approve a pending learning candidate by ID and store it.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "candidate_id": {"type": "string", "description": "Candidate ID to approve."},
+            "dry_run": {"type": "boolean", "description": "When true, preview without storing."},
+        },
+        "required": ["candidate_id"],
     },
 }
 
@@ -379,6 +441,7 @@ class QdrantMemoryProvider(MemoryProvider):
         self._config = None
         self._store: Optional[_QdrantStore] = None
         self._indexer: Optional[FileIndexer] = None
+        self._learning_store: Optional[LearningStore] = None
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._session_id = ""
@@ -416,6 +479,15 @@ class QdrantMemoryProvider(MemoryProvider):
             embed_fn=lambda texts: _embed(texts, self._config),
             config=self._config,
         )
+        self._learning_store = LearningStore(
+            self._store,
+            embed_fn=lambda texts: _embed(texts, self._config),
+            config=self._config,
+        )
+        try:
+            self._learning_store.ensure_collection()
+        except Exception:
+            logger.debug("Learning collection setup failed — learning tools unavailable", exc_info=True)
 
     def shutdown(self) -> None:
         if self._store:
@@ -526,7 +598,12 @@ class QdrantMemoryProvider(MemoryProvider):
     # ── Tools ─────────────────────────────────────────────────────────────
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, INDEX_SCHEMA]
+        return [
+            PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA,
+            INDEX_SCHEMA,
+            LEARNING_STORE_SCHEMA, LEARNING_SEARCH_SCHEMA,
+            LEARNING_PREVIEW_SCHEMA, LEARNING_APPROVE_SCHEMA,
+        ]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -623,6 +700,74 @@ class QdrantMemoryProvider(MemoryProvider):
                 )
                 self._record_success()
                 return json.dumps(result)
+
+            # ── Learning tools ──────────────────────────────────────────
+
+            elif tool_name == "qdrant_learning_store":
+                if not self._learning_store:
+                    return tool_error("Learning store not initialized")
+                result = self._learning_store.store_learning(
+                    lesson=args["lesson"],
+                    learning_type=args.get("learning_type", "workflow_lesson"),
+                    trigger=args.get("trigger", ""),
+                    mistake=args.get("mistake", ""),
+                    correction=args.get("correction", ""),
+                    evidence=args.get("evidence", ""),
+                    tool_name=args.get("tool_name", ""),
+                    command=args.get("command", ""),
+                    importance=int(args.get("importance", 7)),
+                    confidence=float(args.get("confidence", 0.8)),
+                    tags=args.get("tags", []),
+                    promote_to_skill_candidate=args.get("promote_to_skill", False),
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                )
+                self._record_success()
+                return json.dumps({"result": "Learning stored.", **result})
+
+            elif tool_name == "qdrant_learning_search":
+                if not self._learning_store:
+                    return tool_error("Learning store not initialized")
+                results = self._learning_store.search(
+                    query=args["query"],
+                    top_k=int(args.get("top_k", 5)),
+                    learning_type=args.get("learning_type", ""),
+                    user_id=self._user_id,
+                )
+                self._record_success()
+                return json.dumps({"results": results, "count": len(results)})
+
+            elif tool_name == "qdrant_learning_preview":
+                if not self._learning_store:
+                    return tool_error("Learning store not initialized")
+                pending = self._learning_store.get_pending()
+                return json.dumps({"pending": pending, "count": len(pending)})
+
+            elif tool_name == "qdrant_learning_approve":
+                if not self._learning_store:
+                    return tool_error("Learning store not initialized")
+                cid = args["candidate_id"]
+                dry_run = args.get("dry_run", True)
+                if dry_run:
+                    pending = self._learning_store.get_pending()
+                    target = next((c for c in pending if c.get("candidate_id") == cid), None)
+                    if target:
+                        return json.dumps({
+                            "dry_run": True,
+                            "result": f"Would approve: {target.get('lesson', '?')[:120]}",
+                            "candidate": target,
+                        })
+                    return json.dumps({"dry_run": True, "result": "Candidate not found."})
+
+                result = self._learning_store.approve_candidate(
+                    cid,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                )
+                if result:
+                    self._record_success()
+                    return json.dumps({"result": "Candidate approved and stored.", **result})
+                return json.dumps({"result": "Candidate not found."})
 
             return tool_error(f"Unknown tool: {tool_name}")
 
