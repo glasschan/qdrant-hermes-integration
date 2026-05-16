@@ -147,11 +147,18 @@ REMEMBER_SCHEMA = {
 
 FORGET_SCHEMA = {
     "name": "qdrant_forget",
-    "description": "Delete a vector memory by its point ID.",
+    "description": (
+        "Delete a vector memory by its point ID. "
+        "Dry-run defaults to true — always preview first before live deletion."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "point_id": {"type": "string", "description": "The point ID (UUID) to delete."},
+            "dry_run": {
+                "type": "boolean",
+                "description": "When true (default), only report what would be deleted without deleting.",
+            },
         },
         "required": ["point_id"],
     },
@@ -291,6 +298,28 @@ class _QdrantStore:
             ],
         )
         return point_id
+
+    def get_point(self, point_id: str) -> Optional[dict]:
+        """Retrieve a single point's payload by ID. Returns None if not found."""
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection,
+                ids=[point_id],
+                with_payload=True,
+            )
+            if not points:
+                return None
+            p = points[0]
+            if p.payload is None:
+                return None
+            return {
+                "id": str(p.id),
+                "content": p.payload.get("content", ""),
+                "category": p.payload.get("category", ""),
+                "created_at": p.payload.get("created_at", ""),
+            }
+        except Exception:
+            return None
 
     def delete(self, point_id: str) -> bool:
         try:
@@ -517,10 +546,26 @@ class QdrantMemoryProvider(MemoryProvider):
                 point_id = args.get("point_id", "")
                 if not point_id:
                     return tool_error("Missing required parameter: point_id")
+                dry_run = args.get("dry_run", True)  # Default: safe
+
+                if dry_run:
+                    # Preview what would be deleted
+                    memory = self._store.get_point(point_id)
+                    if memory:
+                        return json.dumps({
+                            "dry_run": True,
+                            "result": f"Would delete: [{memory.get('category', '?')}] {memory.get('content', '?')[:120]}",
+                            "point_id": point_id,
+                            "category": memory.get("category", ""),
+                            "created_at": memory.get("created_at", ""),
+                        })
+                    return json.dumps({"dry_run": True, "result": "Memory not found. Nothing to delete."})
+
+                # Live deletion — user explicitly opted in
                 ok = self._store.delete(point_id)
                 self._record_success()
                 if ok:
-                    return json.dumps({"result": "Memory deleted."})
+                    return json.dumps({"result": "Memory deleted.", "id": point_id})
                 return json.dumps({"result": "Memory not found or already deleted."})
 
             return tool_error(f"Unknown tool: {tool_name}")
