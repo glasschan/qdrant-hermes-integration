@@ -13,8 +13,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from plugin.config import VECTOR_DIM
-from plugin.embeddings import embed
+from .config import VECTOR_DIM
+from .embeddings import embed
 
 logger = logging.getLogger(__name__)
 

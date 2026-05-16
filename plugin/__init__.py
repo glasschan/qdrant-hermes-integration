@@ -17,7 +17,7 @@ One-line install:
 
 from __future__ import annotations
 
-from plugin.provider import QdrantMemoryProvider
+from .provider import QdrantMemoryProvider
 
 
 def register(ctx) -> None:

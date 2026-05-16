@@ -15,14 +15,14 @@ from typing import Any, Dict, List, Optional
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
-from plugin.config import (
+from .config import (
     VECTOR_DIM,
     BREAKER_THRESHOLD,
     BREAKER_COOLDOWN_SECS,
     load_config,
 )
-from plugin.embeddings import embed
-from plugin.schemas import (
+from .embeddings import embed
+from .schemas import (
     PROFILE_SCHEMA,
     SEARCH_SCHEMA,
     REMEMBER_SCHEMA,
@@ -34,10 +34,10 @@ from plugin.schemas import (
     LEARNING_PREVIEW_SCHEMA,
     LEARNING_APPROVE_SCHEMA,
 )
-from plugin.store import QdrantStore
-from plugin.indexer import FileIndexer
-from plugin.learning import LearningStore
-from plugin.consolidation import ConsolidationEngine
+from .store import QdrantStore
+from .indexer import FileIndexer
+from .learning import LearningStore
+from .consolidation import ConsolidationEngine
 
 logger = logging.getLogger(__name__)
 
