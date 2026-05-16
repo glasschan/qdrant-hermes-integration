@@ -1,73 +1,138 @@
-# Hermes Qdrant Memory — Integration Pack
+# Hermes Qdrant Memory — Lego Plugin v2
 
-將 Hermes 嘅 built-in memory 升級做 **Qdrant vector memory**，支援 semantic search、auto-prefetch、跨 session recall。
+> **10 tools · 9 modules · 1 command · ~400 lines each**
 
-## ⚠️ IMMUTABLE SAFETY RULES ⚠️
+Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Semantic search over facts, file indexing, procedural learning, and memory consolidation — all local-first.
 
-**🚫 NEVER touch another agent's collection** — plugin hard-scoped to `self._collection`
-**🚫 NEVER delete any collection** — zero `delete_collection()` calls in codebase
-**✅ Each agent auto-namespaces** — `hermes_memories_<hostname>_<profile>`
+## ⚡ One-Liner Install
 
-## 結構
+```bash
+curl -sL https://raw.githubusercontent.com/YOUR_USER/hermes-qdrant-integration/main/setup.sh | bash
+```
+
+Or manual:
+
+```bash
+cp -r plugin/*.py plugin/plugin.yaml ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
+hermes config set memory.provider hermes-memory-qdrant
+hermes gateway restart
+```
+
+## 🧰 Tools (10)
+
+| # | Tool | What it does |
+|---|------|-------------|
+| 1 | `qdrant_profile` | Get all stored memories |
+| 2 | `qdrant_search` | Semantic search by meaning |
+| 3 | `qdrant_remember` | Store a fact (preference/fact/decision/goal/instruction) |
+| 4 | `qdrant_forget` | Delete by point ID — **dry-run first** (safe default) |
+| 5 | `qdrant_index` | Index .md/.txt files with manifest sync |
+| 6 | `qdrant_consolidate` | Report-only duplicate/stale/quality detection |
+| 7 | `qdrant_learning_store` | Store procedural lessons (gated/manual) |
+| 8 | `qdrant_learning_search` | Search procedural learnings |
+| 9 | `qdrant_learning_preview` | Preview pending learning candidates |
+| 10 | `qdrant_learning_approve` | Approve and store a candidate |
+
+## 🧱 Lego Architecture
+
+```
+plugin/
+├── __init__.py       ( 25)  # entry — import + register()
+├── config.py         ( 44)  # env var loading + constants
+├── embeddings.py     ( 30)  # OpenAI-compatible embedding client
+├── store.py          (181)  # QdrantStore — single-collection CRUD
+├── schemas.py        (198)  # all 10 tool JSON schemas
+├── provider.py       (431)  # QdrantMemoryProvider — wires everything
+├── indexer.py        (359)  # FileIndexer — .md/.txt + manifest sync
+├── learning.py       (258)  # LearningStore — procedural lessons
+└── consolidation.py  (337)  # ConsolidationEngine — report-only
+```
+
+**Total: 1,863 lines. Each file self-contained, independently testable. Swap any piece without touching the rest.**
+
+## ⚠️ Safety Rules
+
+| Rule | Enforcement |
+|------|------------|
+| Never delete any Qdrant collection | Zero `delete_collection()` calls in codebase |
+| Each agent = own collection | Hard-scoped to `self._collection` at init |
+| Dry-run first | `qdrant_forget`, `qdrant_index`, `qdrant_learning_approve` default dry_run=true |
+| Consolidation = read-only | `qdrant_consolidate` finds issues, NEVER mutates |
+| Learning = gated/manual | Auto-extraction disabled; all learnings explicitly stored |
+
+## 📦 Prerequisites
+
+- Python 3.10+ with `qdrant-client`
+- Qdrant server (`docker run -p 6333:6333 qdrant/qdrant`)
+- OpenAI-compatible embedding API endpoint + key
+
+## 🚀 Deploy to Another Hermes Instance
+
+From this repo:
+
+```bash
+# Clone the repo
+git clone https://github.com/YOUR_USER/hermes-qdrant-integration.git
+cd hermes-qdrant-integration
+
+# Run setup (interactive)
+bash setup.sh
+
+# Or manual deploy
+cp -r plugin/ ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
+hermes config set memory.provider hermes-memory-qdrant
+hermes gateway restart
+```
+
+From a remote Hermes (user downloads your repo):
+
+```bash
+# Their machine
+curl -sL https://raw.githubusercontent.com/YOUR_USER/hermes-qdrant-integration/main/setup.sh | bash
+```
+
+## 🧪 Verification
+
+```bash
+hermes doctor --fix
+# Expected: ✓ hermes-memory-qdrant provider active
+
+hermes chat -q "list all Qdrant tools you have access to"
+# Expected: 10 tools listed
+```
+
+## 📄 Env Vars
+
+| Variable | Required | Default |
+|----------|----------|---------|
+| `QDRANT_URL` | No | `http://localhost:6333` |
+| `QDRANT_API_KEY` | No | — |
+| `QDRANT_COLLECTION` | No | auto: `hermes_memories_<hostname>_<profile>` |
+| `EMBEDDING_BASE_URL` | **Yes** | — |
+| `EMBEDDING_API_KEY` | **Yes** | — |
+| `EMBEDDING_MODEL` | No | `doubao-embedding-vision` |
+
+## 📁 Full Repo
 
 ```
 hermes-qdrant-integration/
-├── README.md          ← 呢份
-├── SKILL.md           ← 完整 setup guide + troubleshooting
-├── setup.sh           ← 一鍵 setup script
+├── README.md          # ← this file
+├── SKILL.md           # Full setup guide + troubleshooting
+├── PLAN.md            # Implementation plan (Phases 1-6)
+├── setup.sh           # One-command installer
 └── plugin/
-    ├── __init__.py    ← MemoryProvider 實作 (~620 lines)
-    └── plugin.yaml    ← Plugin metadata
+    ├── plugin.yaml    # Hermes plugin metadata
+    ├── __init__.py    # Entry point
+    ├── config.py      # Config loading
+    ├── embeddings.py  # Embedding client
+    ├── store.py       # Qdrant CRUD wrapper
+    ├── schemas.py     # Tool definitions
+    ├── provider.py    # MemoryProvider impl
+    ├── indexer.py     # File indexing
+    ├── learning.py    # Learning store
+    └── consolidation.py  # Memory consolidation
 ```
 
-## 快速安裝
+## 📜 License
 
-```bash
-# 1. 抄 plugin 去 Hermes
-cp -r plugin ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant
-
-# 2. 裝 dependency
-cd ~/.hermes/hermes-agent && uv pip install qdrant-client
-
-# 3. 開 config
-hermes config set memory.provider hermes-memory-qdrant
-
-# 4. 加 env vars 去 ~/.hermes/.env
-cat >> ~/.hermes/.env << 'EOF'
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=your-key
-EMBEDDING_BASE_URL=https://your-endpoint/v1
-EMBEDDING_API_KEY=your-key
-EMBEDDING_MODEL=your-model
-QDRANT_COLLECTION=hermes_memories_your_project_name
-EOF
-
-# 5. 驗證
-hermes doctor --fix
-hermes chat -q "qdrant_remember 記低：Test memory"
-hermes chat -q "qdrant_search 搜尋 'Test memory'"
-```
-
-或者一鍵 run `bash setup.sh`。
-
-## Env Vars
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `QDRANT_URL` | No | http://localhost:6333 | Qdrant server URL |
-| `QDRANT_API_KEY` | No | — | Qdrant API key |
-| `QDRANT_COLLECTION` | No | auto-generated | **Per-agent namespace. Plugin never touches other collections.** |
-| `EMBEDDING_BASE_URL` | **Yes** | — | OpenAI-compatible embeddings endpoint |
-| `EMBEDDING_API_KEY` | **Yes** | — | Embedding API key |
-| `EMBEDDING_MODEL` | No | doubao-embedding-vision | Embedding model name |
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `qdrant_search` | Semantic search within own collection |
-| `qdrant_remember` | Store a fact within own collection |
-| `qdrant_profile` | Get all memories within own collection |
-| `qdrant_forget` | Delete a single point by ID only — **never drops collections** |
-
-詳見 `SKILL.md`。
+MIT — use it, modify it, ship it.
