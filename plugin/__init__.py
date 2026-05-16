@@ -29,6 +29,7 @@ from tools.registry import tool_error
 
 from plugin.indexer import FileIndexer
 from plugin.learning import LearningStore
+from plugin.consolidation import ConsolidationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,40 @@ INDEX_SCHEMA = {
             },
         },
         "required": ["paths"],
+    },
+}
+
+CONSOLIDATE_SCHEMA = {
+    "name": "qdrant_consolidate",
+    "description": (
+        "Generate a read-only memory consolidation report. "
+        "Finds duplicates, stale memories, and quality warnings. "
+        "NEVER mutates data — report-only by design."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "scope": {
+                "type": "string",
+                "description": "Which collections to scan: memory, learning, or both.",
+                "enum": ["memory", "learning", "both"],
+            },
+            "max_points": {
+                "type": "integer",
+                "description": "Max points to scan (default: 500).",
+                "minimum": 10,
+            },
+            "max_groups": {
+                "type": "integer",
+                "description": "Max duplicate groups to return (default: 20).",
+                "minimum": 1,
+            },
+            "include_examples": {
+                "type": "boolean",
+                "description": "Include redacted content examples in report.",
+            },
+        },
+        "required": [],
     },
 }
 
@@ -442,6 +477,7 @@ class QdrantMemoryProvider(MemoryProvider):
         self._store: Optional[_QdrantStore] = None
         self._indexer: Optional[FileIndexer] = None
         self._learning_store: Optional[LearningStore] = None
+        self._consolidation: Optional[ConsolidationEngine] = None
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._session_id = ""
@@ -488,6 +524,11 @@ class QdrantMemoryProvider(MemoryProvider):
             self._learning_store.ensure_collection()
         except Exception:
             logger.debug("Learning collection setup failed — learning tools unavailable", exc_info=True)
+        self._consolidation = ConsolidationEngine(
+            self._store,
+            embed_fn=lambda texts: _embed(texts, self._config),
+            learning_store=self._learning_store,
+        )
 
     def shutdown(self) -> None:
         if self._store:
@@ -601,6 +642,7 @@ class QdrantMemoryProvider(MemoryProvider):
         return [
             PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA,
             INDEX_SCHEMA,
+            CONSOLIDATE_SCHEMA,
             LEARNING_STORE_SCHEMA, LEARNING_SEARCH_SCHEMA,
             LEARNING_PREVIEW_SCHEMA, LEARNING_APPROVE_SCHEMA,
         ]
@@ -697,6 +739,20 @@ class QdrantMemoryProvider(MemoryProvider):
                     max_files=max_files,
                     user_id=self._user_id,
                     agent_id=self._agent_id,
+                )
+                self._record_success()
+                return json.dumps(result)
+
+            # ── Consolidation ──────────────────────────────────────────
+
+            elif tool_name == "qdrant_consolidate":
+                if not self._consolidation:
+                    return tool_error("Consolidation engine not initialized")
+                result = self._consolidation.consolidate(
+                    scope=args.get("scope", "memory"),
+                    max_points=int(args.get("max_points", 500)),
+                    max_groups=int(args.get("max_groups", 20)),
+                    include_examples=bool(args.get("include_examples", False)),
                 )
                 self._record_success()
                 return json.dumps(result)
