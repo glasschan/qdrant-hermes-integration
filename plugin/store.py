@@ -10,8 +10,13 @@ import logging
 import os
 import socket
 import uuid
+import warnings
 from datetime import datetime, timezone
 from typing import Optional
+
+# localhost Qdrant + API key triggers a benign warning about insecure
+# connection. The traffic never leaves the machine — suppress it.
+warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
 
 from .config import VECTOR_DIM
 from .embeddings import embed
