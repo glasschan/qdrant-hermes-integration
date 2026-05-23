@@ -32,7 +32,7 @@ done
 # ── Banner ────────────────────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════╗"
 echo "║  Hermes Qdrant Memory Plugin v$VERSION       ║"
-echo "║  10 tools · 9 modules · 1 command       ║"
+echo "║  10 tools · 10 modules · 3 CLI commands  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
@@ -59,8 +59,16 @@ if [[ "$MODE" == "update" || "$MODE" == "force" ]]; then
     echo ""
 
     if [[ "$MODE" == "update" ]]; then
-        if [ "$(printf '%s\n' "$CURRENT_VERSION" "$VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$VERSION" ]; then
+        # Same version → skip
+        if [ "$CURRENT_VERSION" == "$VERSION" ]; then
             echo "   ✅ Already up to date (v$CURRENT_VERSION)"
+            echo "   Use --force to reinstall."
+            exit 0
+        fi
+        # Current is newer than setup.sh version → dev/ahead
+        NEWER=$(printf '%s\n' "$CURRENT_VERSION" "$VERSION" | sort -V | tail -1)
+        if [ "$NEWER" == "$CURRENT_VERSION" ]; then
+            echo "   ✅ Already up to date (v$CURRENT_VERSION, ahead of v$VERSION)"
             echo "   Use --force to reinstall."
             exit 0
         fi
@@ -79,19 +87,31 @@ if [[ "$MODE" == "update" || "$MODE" == "force" ]]; then
     fi
 fi
 
-# ── Fresh install ─────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ── Copy plugin files ─────────────────────────────────────────────────────
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+fi
 SOURCE_DIR="$SCRIPT_DIR"
 
-# If running via curl | bash, we need the plugin/ subtree; it's at SCRIPT_DIR/plugin/
-if [ ! -d "$SOURCE_DIR/plugin" ]; then
-    # Try the repo root
-    SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-fi
-
-if [ ! -d "$SOURCE_DIR/plugin" ]; then
-    echo "❌ Can't find plugin/ directory. Run this script from the repo root."
-    exit 1
+# If running via curl | bash (no local files), download from GitHub
+if [ -z "$SCRIPT_DIR" ] || [ ! -d "$SOURCE_DIR/plugin" ]; then
+    if [ -d "$(pwd)/plugin" ]; then
+        SOURCE_DIR="$(pwd)"
+    elif command -v curl &>/dev/null && [[ "$MODE" != "install" ]]; then
+        echo "📥 Downloading plugin files from GitHub... (update/force mode)"
+        # For update/force, we download from GitHub tarball
+        TMP_DIR=$(mktemp -d)
+        curl -sL "https://api.github.com/repos/$REPO/tarball/main" | tar xz -C "$TMP_DIR" --strip=1 2>/dev/null || {
+            echo "❌ Failed to download from GitHub."
+            rm -rf "$TMP_DIR"
+            exit 1
+        }
+        SOURCE_DIR="$TMP_DIR"
+    else
+        echo "❌ Can't find plugin/ directory. Run this script from the cloned repo."
+        exit 1
+    fi
 fi
 
 # 1. Create user plugin directory
@@ -160,10 +180,15 @@ EOF
     echo "✅ Env vars written to ~/.hermes/.env"
 fi
 
-# 7. Write VERSION file (in case it wasn't copied)
+# 8. Clean up temp dir (if downloaded from GitHub)
+if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR"
+fi
+
+# 9. Write VERSION file (in case it wasn't copied)
 echo "v$VERSION" > "$PLUGIN_DIR/VERSION"
 
-# 8. Verify
+# 10. Verify
 echo ""
 echo "─── Verification ───"
 hermes doctor --fix 2>&1 | grep -E "(Memory Provider|$PLUGIN_NAME)" || true
