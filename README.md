@@ -1,6 +1,6 @@
-# Hermes Qdrant Memory — Lego Plugin v0.1.0
+# Hermes Qdrant Memory — Lego Plugin v0.2.0
 
-> **10 tools · 9 modules · 1 command · ~400 lines each**
+> **10 tools · 10 modules · 3 CLI commands**
 
 Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Semantic search over facts, file indexing, procedural learning, and memory consolidation — all local-first.
 
@@ -28,8 +28,9 @@ curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/m
 curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --force
 
 # Or via CLI (if cli.py is installed)
-hermes memory-qdrant update
-hermes memory-qdrant version
+hermes hermes-memory-qdrant --update
+hermes hermes-memory-qdrant --check-version
+hermes hermes-memory-qdrant --status
 ```
 
 ## 🧰 Tools (10)
@@ -52,6 +53,7 @@ hermes memory-qdrant version
 ```
 plugin/
 ├── __init__.py       ( 25)  # entry — import + register()
+├── cli.py            (222)  # CLI subcommands (status, check-version, update)
 ├── config.py         ( 44)  # env var loading + constants
 ├── embeddings.py     ( 30)  # OpenAI-compatible embedding client
 ├── store.py          (181)  # QdrantStore — single-collection CRUD
@@ -62,7 +64,7 @@ plugin/
 └── consolidation.py  (337)  # ConsolidationEngine — report-only
 ```
 
-**Total: 1,863 lines. Each file self-contained, independently testable. Swap any piece without touching the rest.**
+**Total: ~2,000 lines across 10 modules. Each file self-contained, independently testable. Swap any piece without touching the rest.**
 
 ## ⚠️ Safety Rules
 
@@ -132,10 +134,12 @@ hermes chat -q "list all Qdrant tools you have access to"
 hermes-qdrant-integration/
 ├── README.md          # ← this file
 ├── SKILL.md           # Full setup guide + troubleshooting
-├── PLAN.md            # Implementation plan (Phases 1-6)
-├── setup.sh           # One-command installer
+├── PLAN.md            # Implementation plan
+├── setup.sh           # Installer with --update/--force flags
 └── plugin/
-    ├── plugin.yaml    # Hermes plugin metadata
+    ├── plugin.yaml    # Hermes plugin metadata (v0.2.0)
+    ├── VERSION        # Plaintext version (v0.2.0)
+    ├── cli.py         # CLI subcommands
     ├── __init__.py    # Entry point
     ├── config.py      # Config loading
     ├── embeddings.py  # Embedding client
