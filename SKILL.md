@@ -110,11 +110,9 @@ curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/m
 
 If the plugin has `plugin/cli.py`, these are available:
 ```bash
-hermes memory-qdrant status    # Show active config
-hermes memory-qdrant stats     # Memory count, learning count
-hermes memory-qdrant version   # Current + latest available
-hermes memory-qdrant update    # Check for update and upgrade
-hermes memory-qdrant flush     # Clear conversation memories (keep facts)
+hermes hermes-memory-qdrant status    # Show plugin status and configuration
+hermes hermes-memory-qdrant version   # Show current and latest available version
+hermes hermes-memory-qdrant update    # Check for update and upgrade
 ```
 
 ## Plugin Architecture

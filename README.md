@@ -28,9 +28,9 @@ curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/m
 curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --force
 
 # Or via CLI (if cli.py is installed)
-hermes hermes-memory-qdrant --update
-hermes hermes-memory-qdrant --check-version
-hermes hermes-memory-qdrant --status
+hermes hermes-memory-qdrant status
+hermes hermes-memory-qdrant version
+hermes hermes-memory-qdrant update
 ```
 
 ## 🧰 Tools (10)
@@ -53,7 +53,7 @@ hermes hermes-memory-qdrant --status
 ```
 plugin/
 ├── __init__.py       ( 25)  # entry — import + register()
-├── cli.py            (222)  # CLI subcommands (status, check-version, update)
+├── cli.py            (222)  # CLI subcommands (status, version, update)
 ├── config.py         ( 44)  # env var loading + constants
 ├── embeddings.py     ( 30)  # OpenAI-compatible embedding client
 ├── store.py          (181)  # QdrantStore — single-collection CRUD

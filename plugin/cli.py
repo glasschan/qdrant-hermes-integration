@@ -3,7 +3,7 @@
 Registered via register_cli(subparser) as per Hermes plugin CLI convention.
 Loaded by discover_plugin_cli_commands() in plugins/memory/__init__.py.
 
-Usage: hermes hermes-memory-qdrant [--version|--update|--status]
+Usage: hermes hermes-memory-qdrant <status|version|update>
 """
 
 from __future__ import annotations
@@ -62,9 +62,9 @@ def _check_latest_version() -> str:
     return "unknown"
 
 
-# ── Handlers ─────────────────────────────────────────────────────────────
+# ── Subcommand handlers ──────────────────────────────────────────────────
 
-def _do_status() -> None:
+def _cmd_status() -> None:
     """Show plugin status."""
     plugin_dir = _get_plugin_dir()
     version = _read_version(plugin_dir)
@@ -101,7 +101,7 @@ def _do_status() -> None:
             print(f"\n⚠️  No Qdrant env vars found in {env_file}")
 
 
-def _do_version() -> None:
+def _cmd_version() -> None:
     """Show current version and check latest available."""
     plugin_dir = _get_plugin_dir()
     current = _read_version(plugin_dir)
@@ -123,18 +123,15 @@ def _do_version() -> None:
                 )
                 newer = result.stdout.strip()
                 if newer == l:
-                    print("Status:  🔄 Update available — run 'hermes hermes-memory-qdrant --update'")
+                    print("Status:  🔄 Update available — run 'hermes hermes-memory-qdrant update'")
                 else:
                     print("Status:  ✅ Up to date (ahead of latest release)")
             except Exception:
                 print("Status:  ⚠️  Could not compare versions")
 
 
-def _do_update() -> None:
-    """Run setup.sh --update to upgrade the plugin.
-
-    Always downloads from GitHub to ensure we get the latest version.
-    """
+def _cmd_update() -> None:
+    """Run setup.sh --update to upgrade the plugin."""
     print("Downloading latest setup.sh from GitHub...")
     try:
         subprocess.run(
@@ -155,54 +152,43 @@ def _do_update() -> None:
 # ── Registration ─────────────────────────────────────────────────────────
 
 def register_cli(subparser) -> None:
-    """Configure the 'hermes hermes-memory-qdrant' subcommand.
+    """Build the 'hermes hermes-memory-qdrant' argparse tree.
 
-    Uses flags (--version, --update, --status) instead of sub-subparsers
-    for simplicity and compatibility with Hermes CLI dispatch.
+    Follows the official Hermes plugin CLI convention from:
+    https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin
     """
-    subparser.add_argument(
-        "--check-version", "-c",
-        action="store_true",
-        help="Show current version and check latest available",
-    )
-    subparser.add_argument(
-        "--update", "-u",
-        action="store_true",
-        help="Check for update and upgrade",
-    )
-    subparser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show plugin status and configuration",
-    )
+    subs = subparser.add_subparsers(dest="memory_qdrant_command", title="subcommands")
+
+    p = subs.add_parser("status", help="Show plugin status and configuration")
+    p.set_defaults(handler=_cmd_status)
+
+    p = subs.add_parser("version", help="Show current and latest available version")
+    p.set_defaults(handler=_cmd_version)
+
+    p = subs.add_parser("update", help="Check for update and upgrade")
+    p.set_defaults(handler=_cmd_update)
 
 
-# ── Top-level handler ────────────────────────────────────────────────────
-# Hermes looks for a function named '<plugin-name>_command' in cli.py.
-# For 'hermes-memory-qdrant', it's hermes_memory_qdrant_command (dash → underscore).
+# ── Dispatch ─────────────────────────────────────────────────────────────
+# Hermes CLI looks for '<provider-name>_command' in cli.py via getattr().
+# Since provider name uses dashes ("hermes-memory-qdrant") but Python
+# identifiers can't, we alias it with setattr().
 
 def hermes_memory_qdrant_command(args: argparse.Namespace) -> None:
-    """Handle 'hermes hermes-memory-qdrant' command."""
-    if args.check_version:
-        _do_version()
-    elif args.update:
-        _do_update()
-    elif args.status:
-        _do_status()
+    """Dispatch 'hermes hermes-memory-qdrant <subcommand>'."""
+    handler = getattr(args, "handler", None)
+    if handler:
+        handler()
     else:
-        print("hermes-memory-qdrant plugin — Qdrant vector memory for Hermes Agent")
+        print("Usage: hermes hermes-memory-qdrant <status|version|update>")
         print()
-        print("Usage: hermes hermes-memory-qdrant [--check-version|--update|--status]")
-        print()
-        print("Examples:")
-        print("  hermes hermes-memory-qdrant --status         Show plugin status")
-        print("  hermes hermes-memory-qdrant --check-version  Check versions")
-        print("  hermes hermes-memory-qdrant --update         Upgrade to latest")
+        print("Subcommands:")
+        print("  status    Show plugin status and configuration")
+        print("  version   Show current and latest available version")
+        print("  update    Check for update and upgrade")
 
 
-# Hermes CLI lookup uses the raw provider name (with dashes) as the function
-# name via getattr(). Since Python identifiers can't contain dashes, we
-# alias it here so the discovery system finds the handler.
+# Alias so discover_plugin_cli_commands() finds the handler
 import sys as _sys
 _caller = _sys.modules[__name__]
 setattr(_caller, "hermes-memory-qdrant_command", hermes_memory_qdrant_command)
