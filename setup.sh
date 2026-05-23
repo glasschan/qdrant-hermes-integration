@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ── Constants ─────────────────────────────────────────────────────────────
-VERSION="0.2.0"
+VERSION="0.2.1"
 REPO="glasschan/qdrant-hermes-integration"
 PLUGIN_NAME="hermes-memory-qdrant"
 PLUGIN_DIR="$HOME/.hermes/plugins/$PLUGIN_NAME"

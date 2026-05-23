@@ -1,7 +1,7 @@
 ---
 name: hermes-memory-qdrant
 description: "Complete guide: add Qdrant vector memory to any Hermes Agent instance — plugin setup, config, migration, and troubleshooting."
-version: 0.2.0
+version: 0.2.1
 metadata:
   hermes:
     tags: [memory, qdrant, vector, plugin]
