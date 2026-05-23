@@ -30,14 +30,9 @@ from .schemas import (
     FORGET_SCHEMA,
     INDEX_SCHEMA,
     CONSOLIDATE_SCHEMA,
-    LEARNING_STORE_SCHEMA,
-    LEARNING_SEARCH_SCHEMA,
-    LEARNING_PREVIEW_SCHEMA,
-    LEARNING_APPROVE_SCHEMA,
 )
 from .store import QdrantStore
 from .indexer import FileIndexer
-from .learning import LearningStore
 from .consolidation import ConsolidationEngine
 
 logger = logging.getLogger(__name__)
@@ -50,7 +45,6 @@ class QdrantMemoryProvider(MemoryProvider):
         self._config = None
         self._store: Optional[QdrantStore] = None
         self._indexer: Optional[FileIndexer] = None
-        self._learning_store: Optional[LearningStore] = None
         self._consolidation: Optional[ConsolidationEngine] = None
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
@@ -89,13 +83,8 @@ class QdrantMemoryProvider(MemoryProvider):
         _efn = lambda texts: embed(texts, self._config)
 
         self._indexer = FileIndexer(self._store, embed_fn=_efn, config=self._config)
-        self._learning_store = LearningStore(self._store, embed_fn=_efn, config=self._config)
-        try:
-            self._learning_store.ensure_collection()
-        except Exception:
-            logger.debug("Learning collection setup failed", exc_info=True)
         self._consolidation = ConsolidationEngine(
-            self._store, embed_fn=_efn, learning_store=self._learning_store
+            self._store, embed_fn=_efn, learning_store=None
         )
 
     def shutdown(self) -> None:
@@ -218,8 +207,6 @@ class QdrantMemoryProvider(MemoryProvider):
             PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA,
             INDEX_SCHEMA,
             CONSOLIDATE_SCHEMA,
-            LEARNING_STORE_SCHEMA, LEARNING_SEARCH_SCHEMA,
-            LEARNING_PREVIEW_SCHEMA, LEARNING_APPROVE_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
@@ -340,69 +327,6 @@ class QdrantMemoryProvider(MemoryProvider):
                 )
                 self._record_success()
                 return json.dumps(result)
-
-            # ── Learning tools ──────────────────────────────────────────
-            elif tool_name == "qdrant_learning_store":
-                if not self._learning_store:
-                    return tool_error("Learning store not initialized")
-                result = self._learning_store.store_learning(
-                    lesson=args["lesson"],
-                    learning_type=args.get("learning_type", "workflow_lesson"),
-                    trigger=args.get("trigger", ""),
-                    mistake=args.get("mistake", ""),
-                    correction=args.get("correction", ""),
-                    evidence=args.get("evidence", ""),
-                    tool_name=args.get("tool_name", ""),
-                    command=args.get("command", ""),
-                    importance=int(args.get("importance", 7)),
-                    confidence=float(args.get("confidence", 0.8)),
-                    tags=args.get("tags", []),
-                    promote_to_skill_candidate=args.get("promote_to_skill", False),
-                    user_id=self._user_id, agent_id=self._agent_id,
-                )
-                self._record_success()
-                return json.dumps({"result": "Learning stored.", **result})
-
-            elif tool_name == "qdrant_learning_search":
-                if not self._learning_store:
-                    return tool_error("Learning store not initialized")
-                results = self._learning_store.search(
-                    query=args["query"],
-                    top_k=int(args.get("top_k", 5)),
-                    learning_type=args.get("learning_type", ""),
-                    user_id=self._user_id,
-                )
-                self._record_success()
-                return json.dumps({"results": results, "count": len(results)})
-
-            elif tool_name == "qdrant_learning_preview":
-                if not self._learning_store:
-                    return tool_error("Learning store not initialized")
-                pending = self._learning_store.get_pending()
-                return json.dumps({"pending": pending, "count": len(pending)})
-
-            elif tool_name == "qdrant_learning_approve":
-                if not self._learning_store:
-                    return tool_error("Learning store not initialized")
-                cid = args["candidate_id"]
-                dry_run = args.get("dry_run", True)
-                if dry_run:
-                    pending = self._learning_store.get_pending()
-                    target = next((c for c in pending if c.get("candidate_id") == cid), None)
-                    if target:
-                        return json.dumps({
-                            "dry_run": True,
-                            "result": f"Would approve: {target.get('lesson', '?')[:120]}",
-                            "candidate": target,
-                        })
-                    return json.dumps({"dry_run": True, "result": "Candidate not found."})
-                result = self._learning_store.approve_candidate(
-                    cid, user_id=self._user_id, agent_id=self._agent_id,
-                )
-                if result:
-                    self._record_success()
-                    return json.dumps({"result": "Candidate approved and stored.", **result})
-                return json.dumps({"result": "Candidate not found."})
 
             return tool_error(f"Unknown tool: {tool_name}")
 

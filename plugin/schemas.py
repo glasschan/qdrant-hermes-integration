@@ -1,6 +1,6 @@
 """Tool schemas for Qdrant memory plugin.
 
-All 10 tool definitions in one place. Imported by provider.py.
+All 6 tool definitions in one place. Imported by provider.py.
 """
 
 PROFILE_SCHEMA = {
@@ -141,69 +141,7 @@ CONSOLIDATE_SCHEMA = {
     },
 }
 
-LEARNING_STORE_SCHEMA = {
-    "name": "qdrant_learning_store",
-    "description": (
-        "Store an explicit procedural learning in the separate Qdrant learning collection. "
-        "Manual/gated only — not automatic."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "lesson": {"type": "string", "description": "The durable lesson/procedure learned."},
-            "learning_type": {
-                "type": "string",
-                "description": "tool_failure_lesson, user_correction, workflow_lesson, or environment_quirk.",
-            },
-            "trigger": {"type": "string", "description": "Situation that should trigger recall."},
-            "mistake": {"type": "string", "description": "What went wrong."},
-            "correction": {"type": "string", "description": "The corrected action."},
-            "evidence": {"type": "string", "description": "Evidence supporting the lesson."},
-            "tool_name": {"type": "string", "description": "Tool involved, if any."},
-            "importance": {"type": "integer", "description": "Importance 1-10 (default: 7).", "minimum": 1, "maximum": 10},
-            "confidence": {"type": "number", "description": "Confidence 0-1 (default: 0.8).", "minimum": 0, "maximum": 1},
-            "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags."},
-            "promote_to_skill": {"type": "boolean", "description": "Mark as skill promotion candidate."},
-        },
-        "required": ["lesson"],
-    },
-}
-
-LEARNING_SEARCH_SCHEMA = {
-    "name": "qdrant_learning_search",
-    "description": "Search procedural learnings from the separate Qdrant learning collection.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "What to search for."},
-            "top_k": {"type": "integer", "description": "Max results (default: 5, max: 20)."},
-            "learning_type": {"type": "string", "description": "Optional filter by learning_type."},
-        },
-        "required": ["query"],
-    },
-}
-
-LEARNING_PREVIEW_SCHEMA = {
-    "name": "qdrant_learning_preview",
-    "description": "Preview pending gated learning candidates. Dry-run only — never writes.",
-    "parameters": {"type": "object", "properties": {}, "required": []},
-}
-
-LEARNING_APPROVE_SCHEMA = {
-    "name": "qdrant_learning_approve",
-    "description": "Approve a pending learning candidate by ID and store it.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "candidate_id": {"type": "string", "description": "Candidate ID to approve."},
-            "dry_run": {"type": "boolean", "description": "When true, preview without storing."},
-        },
-        "required": ["candidate_id"],
-    },
-}
-
 # Convenience lists
 CORE_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA]
 EXTENDED_SCHEMAS = [INDEX_SCHEMA, CONSOLIDATE_SCHEMA]
-LEARNING_SCHEMAS = [LEARNING_STORE_SCHEMA, LEARNING_SEARCH_SCHEMA, LEARNING_PREVIEW_SCHEMA, LEARNING_APPROVE_SCHEMA]
-ALL_SCHEMAS = CORE_SCHEMAS + EXTENDED_SCHEMAS + LEARNING_SCHEMAS
+ALL_SCHEMAS = CORE_SCHEMAS + EXTENDED_SCHEMAS
