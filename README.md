@@ -13,9 +13,23 @@ curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/m
 Or manual:
 
 ```bash
-cp -r plugin/*.py plugin/plugin.yaml ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
+cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
 hermes config set memory.provider hermes-memory-qdrant
 hermes gateway restart
+```
+
+## 🔄 Updating
+
+```bash
+# Check for update and upgrade
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --update
+
+# Force reinstall (same version)
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --force
+
+# Or via CLI (if cli.py is installed)
+hermes memory-qdrant update
+hermes memory-qdrant version
 ```
 
 ## 🧰 Tools (10)
@@ -79,7 +93,7 @@ cd hermes-qdrant-integration
 bash setup.sh
 
 # Or manual deploy
-cp -r plugin/ ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
+cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
 hermes config set memory.provider hermes-memory-qdrant
 hermes gateway restart
 ```

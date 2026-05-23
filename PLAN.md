@@ -1,33 +1,35 @@
 # Qdrant Integration Improvement Plan
 
-Branch: `feature/dry-run-indexing-learning-consolidation`
+## v0.2.0 — Plugin Alignment & Update Mechanism
 
-## Phase 3: Dry-Run Safety on qdrant_forget
-- Add `dry_run` parameter to FORGET_SCHEMA (default: true)
-- In handle_tool_call, when dry_run=true: return what WOULD be deleted without deleting
-- When dry_run=false: actually delete (user must explicitly opt-in)
+Branch: `feature/plugin-align-update-mechanism`
 
-## Phase 4: File Indexing
-- New tool: `qdrant_index` — index .md/.txt files into Qdrant
-- New file: `plugin/indexer.py` — FileIndexer class
-- Features:
-  - Index single files or directories
-  - Manifest sync (detect changed/deleted files via hash)
-  - Dry-run first (preview chunks before upserting)
-  - Configurable extensions, exclude dirs, max files
-  - Payload: source_type="file", file_path, heading, chunk_index
+### Changes
 
-## Phase 5: Learning Collection
-- New tools: `qdrant_learning_store`, `qdrant_learning_search`, `qdrant_learning_preview`
-- New file: `plugin/learning.py` — LearningStore class
-- Separate Qdrant collection: `<collection_name>_learnings`
-- Structured fields: lesson, learning_type, trigger, mistake, correction, evidence
-- Auto-extract disabled by default (manual/gated only)
+1. **Install path moved** — from bundled (`~/.hermes/hermes-agent/plugins/memory/`) to user-installed (`~/.hermes/plugins/`), aligning with official Hermes direction
+2. **Update mechanism** — `setup.sh --update` / `setup.sh --force` with semver comparison + backup
+3. **CLI subcommands** — `hermes memory-qdrant {status,version,update}` via new `plugin/cli.py`
+4. **Version tracking** — `plugin/VERSION` plaintext file + bumped `plugin.yaml` to 0.2.0
+5. **Old bundled cleanup** — setup.sh automatically removes old bundled copy
 
-## Phase 6: Basic Consolidation
-- New tool: `qdrant_consolidate` — report-only, never mutates
-- New file: `plugin/consolidation.py`
-- Features:
-  - Duplicate detection (cosine similarity threshold)
-  - Stale memory detection (age-based)
-  - Report output only — no automatic deletion/merge
+### Files Changed
+- `setup.sh` — new path, --update/--force flags, version check, backup, old cleanup
+- `README.md` — new install paths, added Updating section
+- `SKILL.md` — new paths, full Lego architecture, update instructions
+- `plugin/cli.py` — new file, CLI commands for status/version/update
+- `plugin/VERSION` — new file, plaintext version
+- `plugin/plugin.yaml` — bumped 0.1.0 → 0.2.0
+
+### Verification
+```bash
+# Deploy to user path
+cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
+
+# Verify
+hermes doctor | grep memory
+hermes memory-qdrant version
+hermes memory-qdrant status
+
+# Functional test
+hermes chat -q "list all Qdrant tools you have access to"
+```

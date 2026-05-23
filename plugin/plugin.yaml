@@ -1,5 +1,5 @@
 name: hermes-memory-qdrant
-version: 0.1.0
+version: 0.2.0
 description: "Qdrant vector memory — semantic long-term memory via local Qdrant + any OpenAI-compatible embedding API."
 pip_dependencies:
   - qdrant-client

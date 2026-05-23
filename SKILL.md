@@ -1,7 +1,10 @@
 ---
 name: hermes-memory-qdrant
 description: "Complete guide: add Qdrant vector memory to any Hermes Agent instance — plugin setup, config, migration, and troubleshooting."
-version: 0.1.0
+version: 0.2.0
+metadata:
+  hermes:
+    tags: [memory, qdrant, vector, plugin]
 ---
 
 # Hermes Qdrant Memory Plugin — Setup Guide
@@ -29,76 +32,50 @@ QDRANT_COLLECTION=hermes_memories_prod_server_a
 QDRANT_COLLECTION=hermes_memories_dev_laptop
 ```
 
-### Enforcement in Code
-```python
-# Every operation uses self._collection — the instance variable set once on init
-def search(self, ...):    client.query_points(collection_name=self._collection, ...)
-def get_all(self, ...):   client.scroll(collection_name=self._collection, ...)
-def add(self, ...):       client.upsert(collection_name=self._collection, ...)
-def delete(self, ...):    client.delete(collection_name=self._collection, ...)
-#                     ↑↑↑ NEVER a variable, NEVER a parameter — always self._collection
-```
-
-## Overview
-
-```
-User message → Embedding API → Qdrant search → Relevant memories injected
-                      ↕
-         Qdrant collection (scoped per agent — never shared!)
-```
-
 ## Prerequisites
 
 - Qdrant server running (local Docker, self-hosted, or Qdrant Cloud)
 - An OpenAI-compatible embedding API endpoint + API key
 - Hermes Agent installed (`hermes` CLI available)
 
-## Step 1: Create the Plugin
+## Installation
 
-Copy `__init__.py` and `plugin.yaml` from this pack to:
-```
-~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
-```
-
-## Step 2: Install Dependencies
-
+### One-Liner
 ```bash
-cd ~/.hermes/hermes-agent
-uv pip install qdrant-client   # or: pip install qdrant-client
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash
 ```
 
-Or if using the built-in venv:
+### Manual
 ```bash
-VIRTUAL_ENV=~/.hermes/hermes-agent/venv uv pip install qdrant-client
-```
+# 1. Copy plugin to user-installed plugins dir
+cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
 
-## Step 3: Configure Hermes
+# 2. Install dep
+pip install qdrant-client
 
-```bash
+# 3. Configure
 hermes config set memory.provider hermes-memory-qdrant
-```
 
-Add to `~/.hermes/.env`:
-```ini
+# 4. Add env vars to ~/.hermes/.env
+cat >> ~/.hermes/.env << 'EOF'
 QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=your-qdrant-key
 EMBEDDING_BASE_URL=https://your-embedding-endpoint/v1
 EMBEDDING_API_KEY=your-embedding-key
 EMBEDDING_MODEL=your-embedding-model
+EOF
 
-# Optional: set a unique name per deployment (auto-generated if empty)
-QDRANT_COLLECTION=hermes_memories_my_project
+# 5. Restart
+hermes gateway restart
 ```
 
-## Step 4: Verify
-
+### Updating
 ```bash
-hermes doctor --fix
-hermes chat -q "使用 qdrant_remember 記低：This is a test memory"
-hermes chat -q "使用 qdrant_search 搜尋 'test memory'"
-```
+# Check for update and upgrade
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --update
 
-If the second session returns the stored memory, integration is complete.
+# Force reinstall
+curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash -s -- --force
+```
 
 ## Env Vars Reference
 
@@ -106,7 +83,7 @@ If the second session returns the stored memory, integration is complete.
 |----------|----------|---------|-------------|
 | `QDRANT_URL` | ✓* | http://localhost:6333 | Qdrant server URL |
 | `QDRANT_API_KEY` | — | — | Qdrant API key |
-| `QDRANT_COLLECTION` | — | auto-generated† | **Per-agent namespace. Plugin never touches other collections.** |
+| `QDRANT_COLLECTION` | — | auto-generated† | Per-agent namespace. Plugin never touches other collections. |
 | `EMBEDDING_BASE_URL` | ✓ | — | OpenAI-compatible embeddings endpoint |
 | `EMBEDDING_API_KEY` | ✓ | — | Embedding API key |
 | `EMBEDDING_MODEL` | — | doubao-embedding-vision | Embedding model name |
@@ -114,40 +91,58 @@ If the second session returns the stored memory, integration is complete.
 *> ✓ means recommended, URL defaults to localhost for local dev*
 *† Auto-generated as `hermes_memories_<hostname>_<profile>` — unique per machine + profile*
 
-## Tools
+## Tools (10)
 
-| Tool | Description |
-|------|-------------|
-| `qdrant_search` | Semantic search within own collection |
-| `qdrant_remember` | Store a fact (preference/fact/decision/goal/instruction) within own collection |
-| `qdrant_profile` | Get all memories within own collection |
-| `qdrant_forget` | Delete a single point by ID within own collection — **never drops collections** |
+| # | Tool | What it does |
+|---|------|-------------|
+| 1 | `qdrant_profile` | Get all stored memories |
+| 2 | `qdrant_search` | Semantic search by meaning |
+| 3 | `qdrant_remember` | Store a fact (preference/fact/decision/goal/instruction) |
+| 4 | `qdrant_forget` | Delete by point ID — dry-run first (safe default) |
+| 5 | `qdrant_index` | Index .md/.txt files with manifest sync |
+| 6 | `qdrant_consolidate` | Report-only duplicate/stale/quality detection |
+| 7 | `qdrant_learning_store` | Store procedural lessons (gated/manual) |
+| 8 | `qdrant_learning_search` | Search procedural learnings |
+| 9 | `qdrant_learning_preview` | Preview pending learning candidates |
+| 10 | `qdrant_learning_approve` | Approve and store a candidate |
 
-## Architecture Note
+## CLI Commands
 
-qdrant-client v1.18+ uses `query_points()` not `search()` — the plugin uses the newer API.
+If the plugin has `plugin/cli.py`, these are available:
+```bash
+hermes memory-qdrant status    # Show active config
+hermes memory-qdrant stats     # Memory count, learning count
+hermes memory-qdrant version   # Current + latest available
+hermes memory-qdrant update    # Check for update and upgrade
+hermes memory-qdrant flush     # Clear conversation memories (keep facts)
+```
+
+## Plugin Architecture
+
+```
+~/.hermes/plugins/hermes-memory-qdrant/   ← User-installed path
+├── plugin.yaml      # Plugin metadata + pip deps
+├── VERSION          # Version file (plaintext)
+├── __init__.py      # Entry — import + register()
+├── config.py        # Env var loading + constants
+├── embeddings.py    # OpenAI-compatible embedding client
+├── store.py         # QdrantStore — single-collection CRUD
+├── schemas.py       # All 10 tool JSON schemas
+├── provider.py      # QdrantMemoryProvider — wires everything
+├── indexer.py       # FileIndexer — .md/.txt + manifest sync
+├── learning.py      # LearningStore — procedural lessons
+├── consolidation.py # ConsolidationEngine — report-only
+├── cli.py           # CLI subcommands (optional)
+```
+
+**Total: ~1,900 lines across 9+1 modules.**
 
 ## Troubleshooting
 
 | Problem | Likely Fix |
 |---------|------------|
 | `UserWarning: Api key with insecure connection` | Qdrant runs on HTTP — safe for local dev, add `export PYTHONWARNINGS="ignore::UserWarning"` to `.env` |
-| `ModuleNotFoundError: No module named 'qdrant_client'` | Run the pip install step |
+| `ModuleNotFoundError: No module named 'qdrant_client'` | Run `pip install qdrant-client` |
 | Memory not prefetching | Run `/reset` or start a new `hermes` session |
 | Embedding API returns 401 | Check `EMBEDDING_API_KEY` in `.env` |
-
-## Plugin Architecture
-
-```
-plugins/memory/hermes-memory-qdrant/
-├── plugin.yaml      # Plugin metadata
-├── __init__.py      # MemoryProvider implementation (~620 lines)
-```
-
-The `__init__.py` provides:
-- `_QdrantStore` — thin wrapper around `qdrant-client` (self._collection, upsert, query_points, scroll, delete point only)
-- `QdrantMemoryProvider` — implements Hermes's `MemoryProvider` ABC
-- Tools: `qdrant_search`, `qdrant_remember`, `qdrant_profile`, `qdrant_forget`
-- Auto-prefetch before each turn
-- Auto-ingest after each turn (non-blocking thread)
-- **Immutable safety**: collection hard-scoped to `self._collection`, zero delete_collection calls
+| Plugin not discovered | Check it's at `~/.hermes/plugins/hermes-memory-qdrant/__init__.py`
