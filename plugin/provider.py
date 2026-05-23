@@ -19,6 +19,7 @@ from .config import (
     VECTOR_DIM,
     BREAKER_THRESHOLD,
     BREAKER_COOLDOWN_SECS,
+    AUTO_SYNC_CONVERSATIONS,
     load_config,
 )
 from .embeddings import embed
@@ -131,11 +132,16 @@ class QdrantMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         coll = self._store.collection if self._store else "?"
+        dedup = self._config.get("dedup_enabled", True) if self._config else True
         return (
             "# Qdrant Memory\n"
             f"Active. Qdrant collection: {coll} (dim={VECTOR_DIM}).\n"
+            f"Pre-save dedup: {'ON' if dedup else 'OFF'}. "
+            "Same content auto-updates existing entry instead of creating duplicates.\n"
             "Use qdrant_search to find memories, qdrant_remember to store facts, "
-            "qdrant_profile for a full overview, qdrant_forget to delete."
+            "qdrant_profile for a full overview, qdrant_forget to delete.\n"
+            "qdrant_remember also accepts optional 'tags' (string array) for better filtering. "
+            "qdrant_search accepts optional 'recency_weight' (0.0-1.0) to favor fresh results."
         )
 
     # ── Prefetch ──────────────────────────────────────────────────────────
@@ -178,6 +184,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if self._is_breaker_open() or not self._store:
+            return
+
+        # Memory hygiene: auto-sync is OFF by default
+        if not self._config or not self._config.get("auto_sync_conversations", AUTO_SYNC_CONVERSATIONS):
             return
 
         def _sync():
@@ -228,7 +238,14 @@ class QdrantMemoryProvider(MemoryProvider):
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
-                lines = [m["memory"] for m in memories if m.get("memory")]
+                lines = []
+                for m in memories:
+                    extra = ""
+                    if m.get("tags"):
+                        extra += f" [{', '.join(m['tags'])}]"
+                    if m.get("version", 1) > 1:
+                        extra += f" (v{m['version']})"
+                    lines.append(f"[{m['category']}]{extra} {m['memory']}")
                 return json.dumps({"result": "\n".join(lines), "count": len(lines)})
 
             elif tool_name == "qdrant_search":
@@ -236,12 +253,24 @@ class QdrantMemoryProvider(MemoryProvider):
                 if not query:
                     return tool_error("Missing required parameter: query")
                 top_k = min(int(args.get("top_k", 10)), 50)
-                results = self._store.search(query, top_k=top_k, user_id=self._user_id)
+                recency_weight = args.get("recency_weight", None)
+                if recency_weight is not None:
+                    recency_weight = float(recency_weight)
+                results = self._store.search(
+                    query, top_k=top_k, user_id=self._user_id,
+                    recency_weight=recency_weight,
+                )
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
                 items = [
-                    {"memory": r["memory"], "score": r["score"], "category": r.get("category", "")}
+                    {
+                        "memory": r["memory"],
+                        "score": r["score"],
+                        "category": r.get("category", ""),
+                        "tags": r.get("tags", []),
+                        "version": r.get("version", 1),
+                    }
                     for r in results
                 ]
                 return json.dumps({"results": items, "count": len(items)})
@@ -251,9 +280,11 @@ class QdrantMemoryProvider(MemoryProvider):
                 if not content:
                     return tool_error("Missing required parameter: content")
                 category = args.get("category", "fact")
+                tags = args.get("tags", None)
                 point_id = self._store.add(
                     content=content, user_id=self._user_id,
                     agent_id=self._agent_id, category=category,
+                    tags=tags,
                 )
                 self._record_success()
                 return json.dumps({"result": "Memory stored.", "id": point_id})
@@ -389,6 +420,11 @@ class QdrantMemoryProvider(MemoryProvider):
             {"key": "embedding_api_key", "description": "API key for the embedding service", "secret": True, "required": True, "env_var": "EMBEDDING_API_KEY"},
             {"key": "embedding_model", "description": "Embedding model name", "default": "doubao-embedding-vision"},
             {"key": "collection_name", "description": "Unique collection name (auto-generated if empty). MUST be unique per deployment.", "env_var": "QDRANT_COLLECTION"},
+            # Memory hygiene settings
+            {"key": "dedup_threshold", "description": "Cosine similarity threshold for pre-save dedup (0.0-1.0, default: 0.85)", "default": "0.85", "env_var": "QDRANT_DEDUP_THRESHOLD"},
+            {"key": "dedup_enabled", "description": "Enable pre-save dedup (default: true)", "default": "true", "env_var": "QDRANT_DEDUP_ENABLED"},
+            {"key": "auto_sync_conversations", "description": "Auto-save user messages to memory (default: false)", "default": "false", "env_var": "QDRANT_AUTO_SYNC"},
+            {"key": "search_recency_weight", "description": "How much to favor recency in search results (0.0-1.0, default: 0.0)", "default": "0.0", "env_var": "QDRANT_RECENCY_WEIGHT"},
         ]
 
     def save_config(self, values: dict, hermes_home: str) -> None:

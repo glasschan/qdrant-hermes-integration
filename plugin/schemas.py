@@ -23,6 +23,10 @@ SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for semantically."},
             "top_k": {"type": "integer", "description": "Max results (default: 10, max: 50)."},
+            "recency_weight": {
+                "type": "number",
+                "description": "How much to favor recent memories. 0.0=pure relevance, 1.0=50/50 relevance+freshness (default: 0.0).",
+            },
         },
         "required": ["query"],
     },
@@ -32,7 +36,9 @@ REMEMBER_SCHEMA = {
     "name": "qdrant_remember",
     "description": (
         "Store a durable fact about the user in Qdrant vector memory. "
-        "Use for explicit preferences, corrections, or decisions."
+        "Use for explicit preferences, corrections, or decisions. "
+        "If the same semantic content already exists (dedup), "
+        "updates the existing entry instead of creating a duplicate."
     ),
     "parameters": {
         "type": "object",
@@ -42,6 +48,11 @@ REMEMBER_SCHEMA = {
                 "type": "string",
                 "enum": ["preference", "fact", "decision", "goal", "instruction"],
                 "description": "Category (default: fact).",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tags for better filtering, e.g. [\"career\", \"salary\"].",
             },
         },
         "required": ["content"],

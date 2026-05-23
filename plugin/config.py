@@ -17,6 +17,12 @@ VECTOR_DIM = 2048
 BREAKER_THRESHOLD = 5
 BREAKER_COOLDOWN_SECS = 120
 
+# Memory hygiene
+DEDUP_THRESHOLD = 0.85          # cosine similarity for duplicate detection
+DEDUP_ENABLED = True             # pre-save dedup on/off
+AUTO_SYNC_CONVERSATIONS = False  # auto-save user messages to memory
+SEARCH_RECENCY_WEIGHT = 0.0      # 0=pure relevance, 1=50/50 relevance+freshness
+
 
 def load_config() -> dict:
     from hermes_constants import get_hermes_home
@@ -30,6 +36,11 @@ def load_config() -> dict:
         "collection_name": os.environ.get("QDRANT_COLLECTION", ""),
         "user_id": os.environ.get("QDRANT_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("QDRANT_AGENT_ID", "hermes"),
+        # Memory hygiene settings
+        "dedup_threshold": float(os.environ.get("QDRANT_DEDUP_THRESHOLD", str(DEDUP_THRESHOLD))),
+        "dedup_enabled": os.environ.get("QDRANT_DEDUP_ENABLED", str(DEDUP_ENABLED)).lower() == "true",
+        "auto_sync_conversations": os.environ.get("QDRANT_AUTO_SYNC", str(AUTO_SYNC_CONVERSATIONS)).lower() == "true",
+        "search_recency_weight": float(os.environ.get("QDRANT_RECENCY_WEIGHT", str(SEARCH_RECENCY_WEIGHT))),
     }
 
     config_path = get_hermes_home() / "qdrant-memory.json"

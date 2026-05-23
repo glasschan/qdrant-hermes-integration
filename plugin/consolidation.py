@@ -23,6 +23,7 @@ STALE_DAYS = 90                  # memories older than this are "stale"
 MIN_IMPORTANCE_FOR_KEEP = 4      # below this + stale = low-value candidate
 MAX_POINTS_TO_SCAN = 500
 MAX_DUPLICATE_GROUPS = 20
+STALE_CATEGORIES_TO_SKIP = ["conversation"]  # always flag these as stale
 
 
 # ── ConsolidationEngine ──────────────────────────────────────────────────────
@@ -165,7 +166,10 @@ class ConsolidationEngine:
                     "id": str(r.id),
                     "content": r.payload.get("content", "") or "",
                     "category": r.payload.get("category", ""),
+                    "tags": r.payload.get("tags", []),
+                    "version": int(r.payload.get("version", 1)),
                     "created_at": r.payload.get("created_at", ""),
+                    "updated_at": r.payload.get("updated_at", r.payload.get("created_at", "")),
                     "importance": int(r.payload.get("importance", 5)),
                     "source_type": r.payload.get("source_type", ""),
                     "vector": r.vector,
@@ -235,7 +239,8 @@ class ConsolidationEngine:
         cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
 
         for p in points:
-            created = p.get("created_at", "")
+            # Use updated_at (or fallback to created_at) for staleness check
+            created = p.get("updated_at") or p.get("created_at", "")
             try:
                 created_dt = datetime.fromisoformat(created)
                 if created_dt.tzinfo is None:
@@ -243,14 +248,23 @@ class ConsolidationEngine:
             except (ValueError, TypeError):
                 continue
 
+            category = p.get("category", "")
+
+            # Skip conversation category — always stale but handled separately
+            if category in STALE_CATEGORIES_TO_SKIP:
+                continue
+
             importance = int(p.get("importance", 5))
             if created_dt < cutoff and importance < MIN_IMPORTANCE_FOR_KEEP:
                 stale.append({
                     "id": p["id"],
                     "content_preview": p["content"][:80],
-                    "category": p.get("category", ""),
+                    "category": category,
+                    "tags": p.get("tags", []),
+                    "version": int(p.get("version", 1)),
                     "importance": importance,
                     "created_at": p["created_at"],
+                    "updated_at": p.get("updated_at", ""),
                     "age_days": (datetime.now(timezone.utc) - created_dt).days,
                 })
 
