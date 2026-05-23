@@ -1,8 +1,16 @@
 # Hermes Qdrant Memory — Lego Plugin v0.3.0
 
-> **10 tools · 10 modules · 3 CLI commands**
+> **6 tools · 6 modules · 3 CLI commands**
 
-Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Semantic search over facts, file indexing, procedural learning, and memory consolidation — all local-first.
+Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Semantic search over facts, file indexing, memory consolidation — all local-first.
+
+**v0.3.0 highlights:**
+- **Pre-save dedup** — same fact auto-updates instead of creating duplicates
+- **Payload metadata** — every entry tracked with `version`, `created_at`, `updated_at`
+- **Tags** — optional string arrays for filtered retrieval
+- **Recency-weighted search** — blend freshness with semantic relevance
+- **Auto-indexes** — payload indexes on `category` + `updated_at` for fast queries
+- **Noise reduction** — `sync_turn()` OFF by default (no auto-saved garbage)
 
 ## ⚡ One-Liner Install
 
@@ -33,20 +41,16 @@ hermes hermes-memory-qdrant version
 hermes hermes-memory-qdrant update
 ```
 
-## 🧰 Tools (10)
+## 🧰 Tools (6)
 
 | # | Tool | What it does |
 |---|------|-------------|
-| 1 | `qdrant_profile` | Get all stored memories |
-| 2 | `qdrant_search` | Semantic search by meaning |
-| 3 | `qdrant_remember` | Store a fact (preference/fact/decision/goal/instruction) |
+| 1 | `qdrant_profile` | Get all stored memories with tags + version info |
+| 2 | `qdrant_search` | Semantic search by meaning, optional `recency_weight` (0.0-1.0) |
+| 3 | `qdrant_remember` | Store a fact — auto-dedup, optional `tags` array |
 | 4 | `qdrant_forget` | Delete by point ID — **dry-run first** (safe default) |
 | 5 | `qdrant_index` | Index .md/.txt files with manifest sync |
 | 6 | `qdrant_consolidate` | Report-only duplicate/stale/quality detection |
-| 7 | `qdrant_learning_store` | Store procedural lessons (gated/manual) |
-| 8 | `qdrant_learning_search` | Search procedural learnings |
-| 9 | `qdrant_learning_preview` | Preview pending learning candidates |
-| 10 | `qdrant_learning_approve` | Approve and store a candidate |
 
 ## 🧱 Lego Architecture
 
@@ -54,17 +58,16 @@ hermes hermes-memory-qdrant update
 plugin/
 ├── __init__.py       ( 25)  # entry — import + register()
 ├── cli.py            (222)  # CLI subcommands (status, version, update)
-├── config.py         ( 44)  # env var loading + constants
+├── config.py         ( 56)  # env var loading + constants
 ├── embeddings.py     ( 30)  # OpenAI-compatible embedding client
-├── store.py          (181)  # QdrantStore — single-collection CRUD
-├── schemas.py        (198)  # all 10 tool JSON schemas
-├── provider.py       (431)  # QdrantMemoryProvider — wires everything
+├── store.py          (372)  # QdrantStore — CRUD + pre-save dedup + indexes
+├── schemas.py        (147)  # all 6 tool JSON schemas
+├── provider.py       (391)  # QdrantMemoryProvider — wires everything
 ├── indexer.py        (359)  # FileIndexer — .md/.txt + manifest sync
-├── learning.py       (258)  # LearningStore — procedural lessons
 └── consolidation.py  (337)  # ConsolidationEngine — report-only
 ```
 
-**Total: ~2,000 lines across 10 modules. Each file self-contained, independently testable. Swap any piece without touching the rest.**
+**Total: ~1,900 lines across 6 modules. Each file self-contained, independently testable. Swap any piece without touching the rest.**
 
 ## ⚠️ Safety Rules
 
@@ -72,9 +75,9 @@ plugin/
 |------|------------|
 | Never delete any Qdrant collection | Zero `delete_collection()` calls in codebase |
 | Each agent = own collection | Hard-scoped to `self._collection` at init |
-| Dry-run first | `qdrant_forget`, `qdrant_index`, `qdrant_learning_approve` default dry_run=true |
+| Dry-run first | `qdrant_forget`, `qdrant_index` default dry_run=true |
 | Consolidation = read-only | `qdrant_consolidate` finds issues, NEVER mutates |
-| Learning = gated/manual | Auto-extraction disabled; all learnings explicitly stored |
+| Pre-save dedup | Auto-updates existing points instead of creating duplicates |
 
 ## 📦 Prerequisites
 
@@ -114,19 +117,23 @@ hermes doctor --fix
 # Expected: ✓ hermes-memory-qdrant provider active
 
 hermes chat -q "list all Qdrant tools you have access to"
-# Expected: 10 tools listed
+# Expected: 6 tools listed
 ```
 
 ## 📄 Env Vars
 
-| Variable | Required | Default |
-|----------|----------|---------|
-| `QDRANT_URL` | No | `http://localhost:6333` |
-| `QDRANT_API_KEY` | No | — |
-| `QDRANT_COLLECTION` | No | auto: `hermes_memories_<hostname>_<profile>` |
-| `EMBEDDING_BASE_URL` | **Yes** | — |
-| `EMBEDDING_API_KEY` | **Yes** | — |
-| `EMBEDDING_MODEL` | No | `doubao-embedding-vision` |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `QDRANT_URL` | No | `http://localhost:6333` | Qdrant server URL |
+| `QDRANT_API_KEY` | No | — | Qdrant API key |
+| `QDRANT_COLLECTION` | No | auto | Collection name (auto-generated if empty) |
+| `EMBEDDING_BASE_URL` | **Yes** | — | OpenAI-compatible embedding endpoint |
+| `EMBEDDING_API_KEY` | **Yes** | — | API key for embedding service |
+| `EMBEDDING_MODEL` | No | `doubao-embedding-vision` | Embedding model name |
+| `QDRANT_DEDUP_THRESHOLD` | No | `0.85` | Cosine similarity threshold for dedup |
+| `QDRANT_DEDUP_ENABLED` | No | `true` | Enable/disable pre-save dedup |
+| `QDRANT_AUTO_SYNC` | No | `false` | Auto-save user messages to memory |
+| `QDRANT_RECENCY_WEIGHT` | No | `0.0` | Recency weight in search (0.0-1.0) |
 
 ## 📁 Full Repo
 
@@ -143,11 +150,10 @@ hermes-qdrant-integration/
     ├── __init__.py    # Entry point
     ├── config.py      # Config loading
     ├── embeddings.py  # Embedding client
-    ├── store.py       # Qdrant CRUD wrapper
+    ├── store.py       # Qdrant CRUD + dedup
     ├── schemas.py     # Tool definitions
     ├── provider.py    # MemoryProvider impl
     ├── indexer.py     # File indexing
-    ├── learning.py    # Learning store
     └── consolidation.py  # Memory consolidation
 ```
 
