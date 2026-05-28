@@ -1,4 +1,4 @@
-# Hermes Qdrant Memory — Lego Plugin v0.3.0
+# Hermes Qdrant Memory — Lego Plugin v0.4.0
 
 > **6 tools · 6 modules · 3 CLI commands**
 
@@ -184,8 +184,8 @@ hermes-qdrant-integration/
 ├── PLAN.md            # Implementation plan
 ├── setup.sh           # Installer with --update/--force flags
 └── plugin/
-    ├── plugin.yaml    # Hermes plugin metadata (v0.3.0)
-    ├── VERSION        # Plaintext version (v0.3.0)
+    ├── plugin.yaml    # Hermes plugin metadata (v0.4.0)
+    ├── VERSION        # Plaintext version (v0.4.0)
     ├── cli.py         # CLI subcommands
     ├── __init__.py    # Entry point
     ├── config.py      # Config loading

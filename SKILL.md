@@ -222,7 +222,7 @@ The `--update` command downloads from GitHub. If the repo is private or the user
 
 `/home/glasschan/paul-hermes/hermes-qdrant-integration`
 
-Branch: `main` (v0.3.0)
+Branch: `main` (v0.4.0)
 
 ## Verification
 
