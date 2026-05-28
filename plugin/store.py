@@ -89,23 +89,25 @@ class QdrantStore:
                 collection_name=self._collection
             ).config.params.get("payload_schema", {})}
 
-            # Index category for filtered search
-            if "category" not in existing:
-                self._client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name="category",
-                    field_type="keyword",
-                )
-                logger.info("Created payload index on 'category'")
+            indexes_to_create = {
+                "category": "keyword",
+                "updated_at": "integer",
+                "priority": "integer",
+                "origin": "keyword",
+            }
 
-            # Index updated_at for time-sorted queries
-            if "updated_at" not in existing:
-                self._client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name="updated_at",
-                    field_type="integer",  # stored as ISO timestamp
-                )
-                logger.info("Created payload index on 'updated_at'")
+            for field_name, field_type in indexes_to_create.items():
+                if field_name not in existing:
+                    try:
+                        self._client.create_payload_index(
+                            collection_name=self._collection,
+                            field_name=field_name,
+                            field_type=field_type,
+                        )
+                        logger.info("Created payload index on '%s'", field_name)
+                    except Exception:
+                        logger.debug("Payload index '%s' may already exist", field_name, exc_info=True)
+
         except Exception:
             logger.debug("Payload index creation skipped (may already exist)", exc_info=True)
 
@@ -118,12 +120,16 @@ class QdrantStore:
         user_id: str = "",
         recency_weight: float | None = None,
         tags: list[str] | None = None,
+        category_boost: dict | None = None,
+        score_threshold: float = 0.3,
     ) -> list[dict]:
-        """Search memory with optional recency weighting and tag filtering.
+        """Search memory with optional recency weighting, tag filtering, and category boost.
 
         recency_weight: 0.0 = pure relevance, 1.0 = 50/50 relevance + freshness.
         If None, falls back to config value.
         tags: Optional list of tags to filter by (AND logic — all must match).
+        category_boost: dict mapping category name → score multiplier (e.g. {"correction": 1.3}).
+        score_threshold: Minimum cosine score to include.
         """
         vector = embed([query_text], self._config)[0]
 
@@ -150,19 +156,35 @@ class QdrantStore:
         results = self._client.query_points(
             collection_name=self._collection,
             query=vector,
-            limit=top_k * 2,  # fetch extra for recency re-rank
+            limit=top_k * 2,  # fetch extra for recency + boost re-rank
             query_filter=query_filter,
             with_payload=True,
-            score_threshold=0.3,
+            score_threshold=score_threshold,
         )
 
         if recency_weight is None:
             recency_weight = float(self._config.get("search_recency_weight", 0.0))
 
+        # Merge config-level boost with caller-provided boost
+        effective_boost = dict(self._config.get("prefetch_category_boost", {}))
+        if category_boost:
+            effective_boost.update(category_boost)
+
         entries = []
         now = datetime.now(timezone.utc)
         for r in results.points:
             score = round(r.score, 4)
+            category = r.payload.get("category", "")
+
+            # Apply category boost (corrections/instructions surface higher)
+            if effective_boost and category in effective_boost:
+                score = round(score * effective_boost[category], 4)
+
+            # Priority boost: higher priority (lower number) → slight score bump
+            priority = int(r.payload.get("priority", 3))
+            if priority <= 2:
+                score = round(score * (1.0 + (3 - priority) * 0.05), 4)
+
             created_raw = r.payload.get("updated_at") or r.payload.get("created_at", "")
             # Apply recency decay if weight > 0
             if recency_weight > 0 and created_raw:
@@ -254,6 +276,8 @@ class QdrantStore:
         agent_id: str,
         category: str = "fact",
         tags: list[str] | None = None,
+        priority: int = 3,
+        origin: str = "explicit",
     ) -> str:
         """Store a memory with pre-save dedup.
 
@@ -291,6 +315,8 @@ class QdrantStore:
                                 "tags": tags or existing.get("tags", []),
                                 "user_id": user_id,
                                 "agent_id": agent_id,
+                                "priority": priority,
+                                "origin": origin,
                                 "created_at": existing.get("created_at", now),
                                 "updated_at": now,
                                 "version": curr_version + 1,
@@ -312,6 +338,8 @@ class QdrantStore:
             "agent_id": agent_id,
             "category": category,
             "tags": tags or [],
+            "priority": priority,
+            "origin": origin,
             "version": 1,
             "created_at": now,
             "updated_at": now,

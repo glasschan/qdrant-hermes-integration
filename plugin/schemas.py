@@ -51,8 +51,19 @@ REMEMBER_SCHEMA = {
             "content": {"type": "string", "description": "The fact to remember."},
             "category": {
                 "type": "string",
-                "enum": ["preference", "fact", "decision", "goal", "instruction"],
-                "description": "Category (default: fact).",
+                "enum": ["preference", "fact", "decision", "goal", "instruction", "correction"],
+                "description": "Category (default: fact). Use 'correction' when the user corrects agent behavior.",
+            },
+            "priority": {
+                "type": "integer",
+                "description": "Priority 1 (highest) to 5 (lowest). Corrections and critical rules: 1-2. Preferences: 3. Facts: 4-5. Default: 3.",
+                "minimum": 1,
+                "maximum": 5,
+            },
+            "origin": {
+                "type": "string",
+                "enum": ["user_correction", "agent_discovery", "explicit", "auto"],
+                "description": "How this memory was created. 'user_correction' = user corrected agent. 'agent_discovery' = agent found this independently. 'explicit' = user said 'remember this'. 'auto' = system-generated. Default: 'explicit'.",
             },
             "tags": {
                 "type": "array",

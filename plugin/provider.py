@@ -20,6 +20,8 @@ from .config import (
     BREAKER_THRESHOLD,
     BREAKER_COOLDOWN_SECS,
     AUTO_SYNC_CONVERSATIONS,
+    PREFETCH_TOP_K,
+    PREFETCH_SCORE_THRESHOLD,
     load_config,
 )
 from .embeddings import embed
@@ -122,15 +124,38 @@ class QdrantMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         coll = self._store.collection if self._store else "?"
         dedup = self._config.get("dedup_enabled", True) if self._config else True
+
+        # Memory stats
+        stats = ""
+        try:
+            if self._store:
+                all_mems = self._store.get_all(user_id=self._user_id, limit=0)
+                total = len(all_mems)
+                cats = {}
+                corrections = 0
+                for m in all_mems:
+                    cat = m.get("category", "unknown")
+                    cats[cat] = cats.get(cat, 0) + 1
+                    if cat == "correction":
+                        corrections += 1
+                cat_str = ", ".join(f"{k}: {v}" for k, v in sorted(cats.items(), key=lambda x: -x[1]))
+                stats = f"\nStats: {total} memories ({cat_str}). Corrections tracked: {corrections}."
+        except Exception:
+            pass
+
         return (
-            "# Qdrant Memory\n"
-            f"Active. Qdrant collection: {coll} (dim={VECTOR_DIM}).\n"
-            f"Pre-save dedup: {'ON' if dedup else 'OFF'}. "
-            "Same content auto-updates existing entry instead of creating duplicates.\n"
+            "# Qdrant Memory (Self-Healing v0.6.0)\n"
+            f"Active. Collection: {coll} (dim={VECTOR_DIM}).{stats}\n"
+            f"Dedup: {'ON' if dedup else 'OFF'}. Auto-context: ON (top {PREFETCH_TOP_K}).\n"
+            "Categories: preference, fact, decision, goal, instruction, correction.\n"
             "Use qdrant_search to find memories, qdrant_remember to store facts, "
             "qdrant_profile for a full overview, qdrant_forget to delete.\n"
-            "qdrant_remember also accepts optional 'tags' (string array) for better filtering. "
-            "qdrant_search accepts optional 'recency_weight' (0.0-1.0) to favor fresh results."
+            "qdrant_remember accepts: category (use 'correction' for behavior fixes), "
+            "priority (1-5), origin ('user_correction'|'agent_discovery'|'explicit'|'auto'), "
+            "tags (string array for filtering).\n"
+            "qdrant_search accepts: recency_weight (0.0-1.0), tags (AND filter).\n"
+            "IMPORTANT: When user corrects your behavior, store it as category='correction' "
+            "with priority=1 so it surfaces first in future turns."
         )
 
     # ── Prefetch ──────────────────────────────────────────────────────────
@@ -149,14 +174,30 @@ class QdrantMemoryProvider(MemoryProvider):
         if self._is_breaker_open() or not self._store:
             return
 
+        top_k = int(self._config.get("prefetch_top_k", PREFETCH_TOP_K)) if self._config else PREFETCH_TOP_K
+        score_threshold = float(self._config.get("prefetch_score_threshold", PREFETCH_SCORE_THRESHOLD)) if self._config else PREFETCH_SCORE_THRESHOLD
+
         def _run():
             try:
-                results = self._store.search(query, top_k=5, user_id=self._user_id)
+                results = self._store.search(
+                    query, top_k=top_k, user_id=self._user_id,
+                    score_threshold=score_threshold,
+                )
                 if results:
-                    lines = [
-                        f"- [{r['category']}] {r['memory']} (score: {r['score']})"
-                        for r in results
-                    ]
+                    lines = []
+                    for r in results:
+                        cat = r.get("category", "")
+                        pri = r.get("priority", 3)
+                        origin = r.get("origin", "")
+                        # Compact format: [category/priority] content (score)
+                        meta = f"{cat}"
+                        if pri <= 2:
+                            meta = f"{meta}/P{pri}"
+                        if origin == "user_correction":
+                            meta = f"⚠️{meta}"
+                        lines.append(
+                            f"- [{meta}] {r['memory']} (score: {r['score']})"
+                        )
                     with self._prefetch_lock:
                         self._prefetch_result = "\n".join(lines)
                 self._record_success()
@@ -269,13 +310,15 @@ class QdrantMemoryProvider(MemoryProvider):
                     return tool_error("Missing required parameter: content")
                 category = args.get("category", "fact")
                 tags = args.get("tags", None)
+                priority = min(max(int(args.get("priority", 3)), 1), 5)
+                origin = args.get("origin", "explicit")
                 point_id = self._store.add(
                     content=content, user_id=self._user_id,
                     agent_id=self._agent_id, category=category,
-                    tags=tags,
+                    tags=tags, priority=priority, origin=origin,
                 )
                 self._record_success()
-                return json.dumps({"result": "Memory stored.", "id": point_id})
+                return json.dumps({"result": "Memory stored.", "id": point_id, "priority": priority, "category": category, "origin": origin})
 
             elif tool_name == "qdrant_forget":
                 point_id = args.get("point_id", "")
@@ -390,3 +433,91 @@ class QdrantMemoryProvider(MemoryProvider):
                     else:
                         env_text += f"\n{line}"
             env_path.write_text(env_text.strip() + "\n", encoding="utf-8")
+
+    # ── Optional hooks (self-healing features) ──────────────────────────
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Mirror built-in memory writes to Qdrant.
+
+        When the built-in memory tool writes (add/replace/remove), this hook
+        fires so Qdrant stays in sync. Useful for ensuring critical rules
+        written to local memory are also available for semantic search.
+        """
+        if self._is_breaker_open() or not self._store:
+            return
+
+        try:
+            if action == "add":
+                self._store.add(
+                    content=content,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    category="instruction",
+                    priority=2,
+                    origin="auto",
+                    tags=["local-memory-mirror", target],
+                )
+            elif action == "replace":
+                # Dedup handles this — same content updates existing point
+                self._store.add(
+                    content=content,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    category="instruction",
+                    priority=2,
+                    origin="auto",
+                    tags=["local-memory-mirror", target],
+                )
+            # "remove" — don't auto-delete from Qdrant (let consolidation handle it)
+            self._record_success()
+        except Exception as e:
+            self._record_failure()
+            logger.debug("on_memory_write mirror failed: %s", e)
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Extract key insights from conversation at session end.
+
+        Stores high-value facts, decisions, and corrections that emerged
+        during the session but weren't explicitly saved.
+        """
+        if self._is_breaker_open() or not self._store:
+            return
+
+        if not self._config or not self._config.get("session_end_auto_extract", True):
+            return
+
+        # Only extract from conversations with enough turns
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        if len(user_msgs) < 3:
+            return
+
+        try:
+            # Extract last few user messages as session summary
+            # (Full LLM extraction would be too expensive for a hook)
+            recent_user = []
+            for m in user_msgs[-5:]:
+                content = m.get("content", "")
+                if isinstance(content, str) and len(content.strip()) > 20:
+                    recent_user.append(content.strip()[:200])
+
+            if recent_user:
+                summary = "Session topics: " + "; ".join(recent_user[:3])
+                self._store.add(
+                    content=summary,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    category="conversation",
+                    priority=5,
+                    origin="auto",
+                    tags=["session-summary"],
+                )
+            self._record_success()
+        except Exception as e:
+            self._record_failure()
+            logger.debug("on_session_end extraction failed: %s", e)

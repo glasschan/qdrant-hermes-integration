@@ -118,6 +118,12 @@ class ConsolidationEngine:
             # 3. Quality warnings
             quality = self._find_quality_issues(points, include_examples)
 
+            # 4. Correction pattern detection (new in v0.6.0)
+            correction_patterns = self._find_correction_patterns(points, include_examples)
+
+            # 5. Evolution suggestions (new in v0.6.0)
+            evolution = self._find_evolution_suggestions(points, correction_patterns)
+
             if dup_groups:
                 proposals.append({
                     "type": "duplicate_clusters",
@@ -142,6 +148,24 @@ class ConsolidationEngine:
                     "collection": collection_name,
                     "warnings": quality,
                     "count": len(quality),
+                    "points_considered": len(points),
+                })
+
+            if correction_patterns:
+                proposals.append({
+                    "type": "correction_patterns",
+                    "collection": collection_name,
+                    "patterns": correction_patterns,
+                    "count": len(correction_patterns),
+                    "points_considered": len(points),
+                })
+
+            if evolution:
+                proposals.append({
+                    "type": "evolution_suggestions",
+                    "collection": collection_name,
+                    "suggestions": evolution,
+                    "count": len(evolution),
                     "points_considered": len(points),
                 })
 
@@ -314,6 +338,114 @@ class ConsolidationEngine:
                 warnings.append(w)
 
         return warnings[:20]
+
+    def _find_correction_patterns(
+        self, points: list[dict], include_examples: bool
+    ) -> list[dict]:
+        """Find clusters of corrections by topic — suggests skill extraction.
+
+        When N+ corrections share similar tags or content themes, they indicate
+        a recurring pain point that should be extracted into a skill.
+        """
+        corrections = [
+            p for p in points
+            if p.get("category") == "correction" or p.get("origin") == "user_correction"
+        ]
+
+        if len(corrections) < 2:
+            return []
+
+        # Group by tags
+        tag_groups: dict[str, list[dict]] = {}
+        ungrouped: list[dict] = []
+
+        for c in corrections:
+            tags = c.get("tags", [])
+            if tags:
+                # Use first non-empty tag as group key
+                key = tags[0] if tags else "ungrouped"
+                tag_groups.setdefault(key, []).append(c)
+            else:
+                ungrouped.append(c)
+
+        patterns = []
+        # Tag-based groups with enough corrections
+        for tag, group in sorted(tag_groups.items(), key=lambda x: -len(x[1])):
+            if len(group) >= 2:
+                pattern = {
+                    "topic": tag,
+                    "correction_count": len(group),
+                    "content_previews": [c["content"][:80] for c in group[:5]],
+                    "suggests_skill": len(group) >= 3,
+                }
+                if include_examples:
+                    pattern["examples"] = [c["content"][:200] for c in group[:3]]
+                patterns.append(pattern)
+
+        return patterns[:10]
+
+    def _find_evolution_suggestions(
+        self, points: list[dict], correction_patterns: list[dict]
+    ) -> list[dict]:
+        """Generate evolution suggestions based on memory analysis.
+
+        Suggests skills, cleanup actions, and improvements based on patterns.
+        """
+        suggestions = []
+
+        # 1. Skill extraction from correction clusters
+        for pattern in correction_patterns:
+            if pattern.get("suggests_skill"):
+                suggestions.append({
+                    "type": "skill_extraction",
+                    "topic": pattern["topic"],
+                    "reason": f"{pattern['correction_count']} corrections on same topic — "
+                              "extract into a skill to prevent recurrence.",
+                    "priority": "high",
+                })
+
+        # 2. Category imbalance
+        cat_counts: dict[str, int] = {}
+        for p in points:
+            cat = p.get("category", "unknown")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        total = len(points)
+        conversation_pct = cat_counts.get("conversation", 0) / max(total, 1)
+        if conversation_pct > 0.5:
+            suggestions.append({
+                "type": "cleanup",
+                "topic": "conversation_overflow",
+                "reason": f"Conversation memories are {conversation_pct:.0%} of total ({cat_counts.get('conversation', 0)}/{total}). "
+                          "Consider running consolidation cleanup.",
+                "priority": "medium",
+            })
+
+        # 3. Priority distribution
+        high_priority = sum(1 for p in points if int(p.get("priority", 3)) <= 2)
+        if high_priority > 50:
+            suggestions.append({
+                "type": "review",
+                "topic": "priority_inflation",
+                "reason": f"{high_priority} memories have priority 1-2. "
+                          "Review if all truly need high priority — too many high-priority items "
+                          "reduces the effectiveness of priority boosting.",
+                "priority": "low",
+            })
+
+        # 4. Low-correction health check
+        correction_count = cat_counts.get("correction", 0)
+        if correction_count == 0 and total > 50:
+            suggestions.append({
+                "type": "health",
+                "topic": "no_corrections",
+                "reason": "No correction memories found with >50 total memories. "
+                          "Either the agent is perfect (unlikely) or corrections aren't being tagged. "
+                          "Encourage tagging user corrections as category='correction'.",
+                "priority": "low",
+            })
+
+        return suggestions
 
 
 # ── math helpers ─────────────────────────────────────────────────────────────

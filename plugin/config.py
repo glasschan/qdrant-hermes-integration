@@ -23,6 +23,22 @@ DEDUP_ENABLED = True             # pre-save dedup on/off
 AUTO_SYNC_CONVERSATIONS = False  # auto-save user messages to memory
 SEARCH_RECENCY_WEIGHT = 0.0      # 0=pure relevance, 1=50/50 relevance+freshness
 
+# Auto-context injection (prefetch)
+PREFETCH_TOP_K = 8              # how many memories to surface per turn
+PREFETCH_SCORE_THRESHOLD = 0.4  # skip results below this cosine score
+PREFETCH_CATEGORY_BOOST = {     # multiply score for high-priority categories
+    "correction": 1.3,
+    "instruction": 1.2,
+    "preference": 1.15,
+}
+
+# Consolidation + evolution
+CONSOLIDATION_CORRECTION_TOPIC_THRESHOLD = 3  # N corrections on same topic → suggest skill
+CONSOLIDATION_ORPHAN_AGE_DAYS = 60            # days without being searched = orphan
+
+# Session-end auto-extraction
+SESSION_END_AUTO_EXTRACT = True
+
 
 def load_config() -> dict:
     from hermes_constants import get_hermes_home
@@ -41,6 +57,15 @@ def load_config() -> dict:
         "dedup_enabled": os.environ.get("QDRANT_DEDUP_ENABLED", str(DEDUP_ENABLED)).lower() == "true",
         "auto_sync_conversations": os.environ.get("QDRANT_AUTO_SYNC", str(AUTO_SYNC_CONVERSATIONS)).lower() == "true",
         "search_recency_weight": float(os.environ.get("QDRANT_RECENCY_WEIGHT", str(SEARCH_RECENCY_WEIGHT))),
+        # Auto-context injection
+        "prefetch_top_k": int(os.environ.get("QDRANT_PREFETCH_TOP_K", str(PREFETCH_TOP_K))),
+        "prefetch_score_threshold": float(os.environ.get("QDRANT_PREFETCH_SCORE_THRESHOLD", str(PREFETCH_SCORE_THRESHOLD))),
+        "prefetch_category_boost": PREFETCH_CATEGORY_BOOST,
+        # Consolidation + evolution
+        "correction_topic_threshold": int(os.environ.get("QDRANT_CORRECTION_TOPIC_THRESHOLD", str(CONSOLIDATION_CORRECTION_TOPIC_THRESHOLD))),
+        "orphan_age_days": int(os.environ.get("QDRANT_ORPHAN_AGE_DAYS", str(CONSOLIDATION_ORPHAN_AGE_DAYS))),
+        # Session-end extraction
+        "session_end_auto_extract": os.environ.get("QDRANT_SESSION_END_EXTRACT", str(SESSION_END_AUTO_EXTRACT)).lower() == "true",
     }
 
     config_path = get_hermes_home() / "qdrant-memory.json"
