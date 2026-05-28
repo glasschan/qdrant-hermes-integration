@@ -84,12 +84,14 @@ if [[ "$MODE" == "update" || "$MODE" == "force" ]]; then
 
     # Backup both paths
     TS=$(date +%Y%m%d_%H%M%S)
-    [ -d "$USER_PLUGIN_DIR" ] && [ ! -d "$USER_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS" ] && \
-        cp -r "$USER_PLUGIN_DIR" "$USER_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS" && \
-        echo "   ✅ Backed up user path: $USER_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS"
-    [ -d "$BUNDLED_PLUGIN_DIR" ] && [ ! -d "$BUNDLED_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS" ] && \
-        cp -r "$BUNDLED_PLUGIN_DIR" "$BUNDLED_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS" && \
-        echo "   ✅ Backed up bundled path: $BUNDLED_PLUGIN_DIR.bak.v$CURRENT_VERSION.$TS"
+    BACKUP_DIR="$HOME/.hermes/plugin-backups"
+    mkdir -p "$BACKUP_DIR"
+    [ -d "$USER_PLUGIN_DIR" ] && [ ! -d "$BACKUP_DIR/$PLUGIN_NAME.user.v$CURRENT_VERSION.$TS" ] && \
+        cp -r "$USER_PLUGIN_DIR" "$BACKUP_DIR/$PLUGIN_NAME.user.v$CURRENT_VERSION.$TS" && \
+        echo "   ✅ Backed up user path: $BACKUP_DIR/$PLUGIN_NAME.user.v$CURRENT_VERSION.$TS"
+    [ -d "$BUNDLED_PLUGIN_DIR" ] && [ ! -d "$BACKUP_DIR/$PLUGIN_NAME.bundled.v$CURRENT_VERSION.$TS" ] && \
+        cp -r "$BUNDLED_PLUGIN_DIR" "$BACKUP_DIR/$PLUGIN_NAME.bundled.v$CURRENT_VERSION.$TS" && \
+        echo "   ✅ Backed up bundled path: $BACKUP_DIR/$PLUGIN_NAME.bundled.v$CURRENT_VERSION.$TS"
 fi
 
 # ── Resolve source directory ─────────────────────────────────────────────
