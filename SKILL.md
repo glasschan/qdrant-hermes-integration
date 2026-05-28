@@ -42,7 +42,7 @@ curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/m
 ```
 
 The setup script handles **everything**:
-- Installs to **both** required paths (user path for tools/CLI + bundled memory path for memory provider discovery)
+- Installs to the standard user-installed plugin path (`~/.hermes/plugins/hermes-memory-qdrant/`)
 - Installs `qdrant-client` in the Hermes venv
 - Sets `memory.provider` in config
 - Adds to `plugins.enabled`
@@ -50,26 +50,19 @@ The setup script handles **everything**:
 
 ## Manual Install
 
-> **Important:** You MUST install to **two paths** for everything to work. This is due to how Hermes discovers memory providers — the `_load_provider_from_dir` function uses different module namespaces for bundled vs user paths, and only the bundled `plugins.memory` namespace properly supports relative imports.
-
 ```bash
-# 1. Install to user path — required for plugin tool registration + CLI
+# 1. Copy plugin to user-installed plugins dir
 cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
 
-# 2. Install to bundled memory path — required for load_memory_provider() 
-#    Uses plugins.memory.hermes-memory-qdrant namespace (relative imports work)
-cp -r plugin/ ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
-
-# 3. Install qdrant-client in Hermes venv
+# 2. Install dep
 source ~/.hermes/hermes-agent/venv/bin/activate
 python3 -m ensurepip --upgrade
 python3 -m pip install qdrant-client
 
-# 4. Set as active memory provider
+# 3. Configure
 hermes config set memory.provider hermes-memory-qdrant
 
-# 5. Enable plugin (for tool schemas to be available)
-#    Note: use Python to avoid the JSON-string YAML bug in hermes config set
+# 4. Enable plugin (for tool schemas)
 python3 -c "
 import re
 path = '$HOME/.hermes/config.yaml'
@@ -80,19 +73,20 @@ if match:
     if 'hermes-memory-qdrant' not in block:
         content = content.replace(block, block.rstrip() + '\n  - hermes-memory-qdrant\n')
         with open(path, 'w') as f: f.write(content)
-        print('✅ Added to plugins.enabled')
 else:
     content += '\nplugins:\n  enabled:\n  - hermes-memory-qdrant\n'
     with open(path, 'w') as f: f.write(content)
 "
 
-# 6. Add to ~/.hermes/.env
-echo 'QDRANT_URL=http://localhost:6333' >> ~/.hermes/.env
-echo 'EMBEDDING_BASE_URL=https://your-api.com/v1' >> ~/.hermes/.env
-echo 'EMBEDDING_API_KEY=sk-...' >> ~/.hermes/.env
-echo 'EMBEDDING_MODEL=doubao-embedding-vision' >> ~/.hermes/.env
+# 5. Add env vars to ~/.hermes/.env
+cat >> ~/.hermes/.env << 'EOF'
+QDRANT_URL=http://localhost:6333
+EMBEDDING_BASE_URL=https://your-embedding-endpoint/v1
+EMBEDDING_API_KEY=your-embedding-key
+EMBEDDING_MODEL=your-embedding-model
+EOF
 
-# 7. Restart gateway (if running)
+# 6. Restart
 hermes gateway restart
 ```
 
@@ -170,26 +164,27 @@ plugin/
 
 **Total: ~1,900 lines across 10 files.**
 
-## Why Dual Install Paths?
+## Self-Healing: Hermes Namespace Bug Fix
 
-Hermes has **two separate discovery mechanisms** for memory providers:
+The plugin **automatically** works around a known Hermes bug where user-installed memory provider plugins fail with `ModuleNotFoundError: No module named '_hermes_user_memory'`.
 
-| Mechanism | Scans | Used By |
-|-----------|-------|---------|
-| **Plugin system** (`plugins.enabled`) | `~/.hermes/plugins/<name>/` | Tool registration, CLI, `hermes plugins list` |
-| **Memory provider loader** (`load_memory_provider`) | `plugins/memory/<name>/` (bundled) then `$HERMES_HOME/plugins/<name>/` (user) | `hermes doctor`, session runtime |
+**Root cause:** Hermes loads user-installed memory providers under the `_hermes_user_memory.<name>` namespace but never registers `_hermes_user_memory` as a Python package in `sys.modules`. This breaks relative imports (`from .schemas import ...`) because Python can't resolve the parent package chain.
 
-The user-installed path (`$HERMES_HOME/plugins/<name>/`) has a **known bug** in Hermes: when loading user-installed memory providers, the function `_load_provider_from_dir()` uses the namespace `_hermes_user_memory.<name>` but **never registers `_hermes_user_memory` as a package** in `sys.modules`. This causes relative imports (e.g., `from .schemas import ...`) to fail with `ModuleNotFoundError: No module named '_hermes_user_memory'`.
+**Self-healing in `__init__.py`:** At load time, the plugin:
+1. Detects the `_hermes_user_memory` namespace from its own `__name__`
+2. Registers the missing parent package in `sys.modules`
+3. Strips half-loaded submodules and reloads everything via `importlib`
+4. Result: all relative imports resolve correctly
 
-**Workaround:** Install to the **bundled memory path** (`plugins/memory/<name>/`) where the `plugins.memory` namespace is already properly set up. The bundled path takes precedence in `find_provider_dir()`, so the memory provider is discovered via the working namespace.
+**No configuration, no dual-path install, no Hermes patches needed.** Single user-installed path works everywhere.
 
 ## Troubleshooting
 
 | Problem | Likely Fix |
 |---------|------------|
-| `hermes doctor` shows "plugin not found" | The plugin must be installed at BOTH `~/.hermes/plugins/hermes-memory-qdrant/` AND `~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/`. Run setup.sh or check manual install steps. |
+| `hermes doctor` shows "plugin not found" | Run setup.sh or check the plugin is at `~/.hermes/plugins/hermes-memory-qdrant/`. Run `hermes doctor --fix \| grep Memory` |
 | `ModuleNotFoundError: No module named 'qdrant_client'` | Activate Hermes venv and run `pip install qdrant-client`. The venv is at `~/.hermes/hermes-agent/venv/` |
-| `No module named '_hermes_user_memory'` | The bundled memory path is missing or incomplete. Copy the full plugin to `plugins/memory/hermes-memory-qdrant/` with `__init__.py` |
+| `No module named '_hermes_user_memory'` | **Fixed in v0.4.0** — the plugin self-heals this. Run setup.sh --force to update. |
 | Tools not showing up in session | Check `plugins.enabled` in `config.yaml` — must include `hermes-memory-qdrant`. Also check `memory.provider` is set. `hermes doctor` shows both. |
 | Qdrant tools visible but not working | Run `hermes gateway restart` to reload the memory provider in running sessions |
 | Memory not prefetching | Start a new session or run `/reset` |

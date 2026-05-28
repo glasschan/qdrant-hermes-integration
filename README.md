@@ -18,47 +18,14 @@ Qdrant-backed persistent vector memory for [Hermes Agent](https://github.com/Nou
 curl -sL https://raw.githubusercontent.com/glasschan/qdrant-hermes-integration/main/setup.sh | bash
 ```
 
-Or manual (note: requires installation to **two** paths):
+Or manual:
 
 ```bash
-# 1. User path — for tool registration + CLI
 cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
-
-# 2. Bundled memory path — for memory provider discovery (plugins.memory namespace)
-cp -r plugin/ ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
-
-# 3. Install dependency in Hermes venv
 source ~/.hermes/hermes-agent/venv/bin/activate
 python3 -m ensurepip --upgrade
 python3 -m pip install qdrant-client
-
-# 4. Configure
 hermes config set memory.provider hermes-memory-qdrant
-
-# 5. Enable plugin (for tool schemas)
-#    Use Python to avoid the JSON-string YAML bug
-python3 -c "
-import re
-path = '$HOME/.hermes/config.yaml'
-with open(path) as f: content = f.read()
-match = re.search(r'enabled:\s*\n(\s+- .+\n?)*', content)
-if match:
-    block = match.group()
-    if 'hermes-memory-qdrant' not in block:
-        content = content.replace(block, block.rstrip() + '\n  - hermes-memory-qdrant\n')
-        with open(path, 'w') as f: f.write(content)
-else:
-    content += '\nplugins:\n  enabled:\n  - hermes-memory-qdrant\n'
-    with open(path, 'w') as f: f.write(content)
-"
-
-# 6. Add env vars to ~/.hermes/.env
-echo 'QDRANT_URL=http://localhost:6333' >> ~/.hermes/.env
-echo 'EMBEDDING_BASE_URL=https://your-api.com/v1' >> ~/.hermes/.env
-echo 'EMBEDDING_API_KEY=*** >> ~/.hermes/.env
-echo 'EMBEDDING_MODEL=doubao-embedding-vision' >> ~/.hermes/.env
-
-# 7. Restart
 hermes gateway restart
 ```
 
@@ -133,9 +100,8 @@ cd hermes-qdrant-integration
 # Run setup (interactive)
 bash setup.sh
 
-# Or manual deploy (dual path install required)
+# Or manual deploy
 cp -r plugin/ ~/.hermes/plugins/hermes-memory-qdrant/
-cp -r plugin/ ~/.hermes/hermes-agent/plugins/memory/hermes-memory-qdrant/
 source ~/.hermes/hermes-agent/venv/bin/activate
 python3 -m ensurepip --upgrade
 python3 -m pip install qdrant-client
