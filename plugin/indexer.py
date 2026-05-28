@@ -110,7 +110,6 @@ class FileIndexer:
         self._extensions: set[str] = DEFAULT_EXTENSIONS.copy()
         self._exclude_dirs: set[str] = DEFAULT_EXCLUDE_DIRS.copy()
         self._max_files: int = int(config.get("index_max_files", 500))
-        self._max_chunk_tokens: int = int(config.get("max_chunk_tokens", 128))
 
         # Manifest cache: {file_path: file_hash}
         self._manifest: dict[str, str] = {}
@@ -253,7 +252,7 @@ class FileIndexer:
         """Load manifest from Qdrant — find points with source_type='file'."""
         try:
             from qdrant_client.http import models
-            results, _ = self._store._client.scroll(
+            results, _ = self._store.client.scroll(
                 collection_name=self._collection,
                 scroll_filter=models.Filter(
                     must=[
@@ -265,6 +264,7 @@ class FileIndexer:
                 ),
                 limit=10000,
                 with_payload=True,
+                with_vectors=False,
             )
             self._manifest = {}
             for r in results:
@@ -274,37 +274,45 @@ class FileIndexer:
                     # Keep the most recent hash
                     self._manifest[fp] = fhash
         except Exception:
+            logger.warning("Failed to load manifest from Qdrant", exc_info=False)
             self._manifest = {}
 
     def _find_stale_ids(self, file_paths: list[str]) -> list[str]:
-        """Find Qdrant point IDs for given file paths (to be deleted)."""
+        """Find Qdrant point IDs for given file paths (to be deleted).
+
+        Batches into a single query with should conditions for efficiency.
+        """
         if not file_paths:
             return []
         try:
             from qdrant_client.http import models
-            ids = []
-            for fp in file_paths:
-                results, _ = self._store._client.scroll(
-                    collection_name=self._collection,
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="source_type",
-                                match=models.MatchValue(value="file"),
-                            ),
-                            models.FieldCondition(
-                                key="file_path",
-                                match=models.MatchValue(value=fp),
-                            ),
-                        ]
-                    ),
-                    limit=100,
-                    with_payload=False,
+
+            # Build a single query with should conditions for all file paths
+            should_conditions = [
+                models.FieldCondition(
+                    key="file_path",
+                    match=models.MatchValue(value=fp),
                 )
-                for r in results:
-                    ids.append(str(r.id))
-            return ids
+                for fp in file_paths
+            ]
+            results, _ = self._store.client.scroll(
+                collection_name=self._collection,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="source_type",
+                            match=models.MatchValue(value="file"),
+                        ),
+                    ],
+                    should=should_conditions,
+                    min_should=1,
+                ),
+                limit=500,
+                with_payload=False,
+            )
+            return [str(r.id) for r in results]
         except Exception:
+            logger.warning("Failed to find stale IDs in Qdrant", exc_info=False)
             return []
 
     def _embed_and_upsert(
@@ -344,7 +352,7 @@ class FileIndexer:
                 )
             )
 
-        self._store._client.upsert(
+        self._store.client.upsert(
             collection_name=self._collection,
             points=points,
         )

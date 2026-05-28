@@ -27,6 +27,11 @@ SEARCH_SCHEMA = {
                 "type": "number",
                 "description": "How much to favor recent memories. 0.0=pure relevance, 1.0=50/50 relevance+freshness (default: 0.0).",
             },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tags to filter by (AND logic — all must match).",
+            },
         },
         "required": ["query"],
     },

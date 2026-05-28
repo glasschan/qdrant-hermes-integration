@@ -77,7 +77,7 @@ def _cmd_status() -> None:
 
     py_files = list(plugin_dir.glob("*.py"))
     print(f"Modules:        {len(py_files)} Python files")
-    print(f"Tools:          10 (qdrant_profile/search/remember/forget/index/consolidate/learning_*)")
+    print(f"Tools:          6 (qdrant_profile/search/remember/forget/index/consolidate)")
 
     # Check env vars
     env_file = hermes_home / ".env"

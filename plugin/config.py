@@ -50,6 +50,6 @@ def load_config() -> dict:
             config.update({k: v for k, v in file_cfg.items()
                            if v is not None and v != ""})
         except Exception:
-            pass
+            logger.warning("Failed to load config from %s", config_path, exc_info=False)
 
     return config

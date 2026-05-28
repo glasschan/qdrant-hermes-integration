@@ -49,6 +49,11 @@ class QdrantStore:
     def collection(self) -> str:
         return self._collection
 
+    @property
+    def client(self):
+        """Expose the Qdrant client for sub-components (indexer, consolidation)."""
+        return self._client
+
     def _ensure_collection(self) -> str:
         """Use/create OUR collection. NEVER delete any collection."""
         from hermes_constants import get_hermes_home
@@ -112,23 +117,36 @@ class QdrantStore:
         top_k: int = 10,
         user_id: str = "",
         recency_weight: float | None = None,
+        tags: list[str] | None = None,
     ) -> list[dict]:
-        """Search memory with optional recency weighting.
+        """Search memory with optional recency weighting and tag filtering.
 
         recency_weight: 0.0 = pure relevance, 1.0 = 50/50 relevance + freshness.
         If None, falls back to config value.
+        tags: Optional list of tags to filter by (AND logic — all must match).
         """
         vector = embed([query_text], self._config)[0]
-        query_filter = None
+
+        must_conditions = []
         if user_id:
-            query_filter = self._models.Filter(
-                must=[
-                    self._models.FieldCondition(
-                        key="user_id",
-                        match=self._models.MatchValue(value=user_id),
-                    )
-                ]
+            must_conditions.append(
+                self._models.FieldCondition(
+                    key="user_id",
+                    match=self._models.MatchValue(value=user_id),
+                )
             )
+        if tags:
+            for tag in tags:
+                must_conditions.append(
+                    self._models.FieldCondition(
+                        key="tags",
+                        match=self._models.MatchValue(value=tag),
+                    )
+                )
+
+        query_filter = None
+        if must_conditions:
+            query_filter = self._models.Filter(must=must_conditions)
         results = self._client.query_points(
             collection_name=self._collection,
             query=vector,
@@ -177,7 +195,13 @@ class QdrantStore:
         entries.sort(key=lambda x: x["score"], reverse=True)
         return entries[:top_k]
 
-    def get_all(self, user_id: str = "", limit: int = 100) -> list[dict]:
+    def get_all(self, user_id: str = "", limit: int = 0) -> list[dict]:
+        """Retrieve all memories with scroll-based pagination.
+
+        Args:
+            user_id: Optional user filter.
+            limit: Max results. 0 = no limit (fetch all). Any positive value caps results.
+        """
         query_filter = None
         if user_id:
             query_filter = self._models.Filter(
@@ -188,12 +212,28 @@ class QdrantStore:
                     )
                 ]
             )
-        results, _ = self._client.scroll(
-            collection_name=self._collection,
-            limit=limit,
-            scroll_filter=query_filter,
-            with_payload=True,
-        )
+
+        all_results = []
+        offset = None
+        page_size = min(limit, 500) if limit > 0 else 500
+
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self._collection,
+                limit=page_size,
+                offset=offset,
+                scroll_filter=query_filter,
+                with_payload=True,
+            )
+            all_results.extend(results)
+
+            if not next_offset or not results:
+                break
+            if limit > 0 and len(all_results) >= limit:
+                all_results = all_results[:limit]
+                break
+            offset = next_offset
+
         return [
             {
                 "id": str(r.id),
@@ -204,7 +244,7 @@ class QdrantStore:
                 "created_at": r.payload.get("created_at", ""),
                 "updated_at": r.payload.get("updated_at", ""),
             }
-            for r in results
+            for r in all_results
         ]
 
     def add(
@@ -235,24 +275,31 @@ class QdrantStore:
                 threshold=dedup_threshold,
             )
             if existing:
-                # Update existing point — preserve original created_at, bump version
+                # Update existing point — upsert with NEW vector + payload
+                # (set_payload alone would leave the vector stale, breaking search accuracy)
                 point_id = existing["id"]
                 curr_version = existing.get("version", 1)
-                self._client.set_payload(
+                self._client.upsert(
                     collection_name=self._collection,
-                    points=[point_id],
-                    payload={
-                        "content": content,
-                        "category": category,
-                        "tags": tags or existing.get("tags", []),
-                        "user_id": user_id,
-                        "agent_id": agent_id,
-                        "updated_at": now,
-                        "version": curr_version + 1,
-                    },
+                    points=[
+                        self._models.PointStruct(
+                            id=point_id,
+                            vector=vector,
+                            payload={
+                                "content": content,
+                                "category": category,
+                                "tags": tags or existing.get("tags", []),
+                                "user_id": user_id,
+                                "agent_id": agent_id,
+                                "created_at": existing.get("created_at", now),
+                                "updated_at": now,
+                                "version": curr_version + 1,
+                            },
+                        )
+                    ],
                 )
                 logger.debug(
-                    "Dedup: updated existing point %s (v%d → v%d)",
+                    "Dedup: upserted existing point %s with new vector (v%d → v%d)",
                     point_id, curr_version, curr_version + 1,
                 )
                 return point_id
@@ -334,7 +381,8 @@ class QdrantStore:
                 payload=payload,
             )
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("update_payload failed for %s: %s", point_id, e)
             return False
 
     def get_point(self, point_id: str) -> Optional[dict]:
@@ -368,7 +416,8 @@ class QdrantStore:
                 points_selector=self._models.PointIdsList(points=[point_id]),
             )
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("delete failed for %s: %s", point_id, e)
             return False
 
     def close(self) -> None:

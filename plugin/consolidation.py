@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
@@ -154,7 +155,7 @@ class ConsolidationEngine:
     def _fetch_all_points(self, collection_name: str, limit: int) -> list[dict]:
         """Scroll all points from a collection."""
         try:
-            results, _ = self._store._client.scroll(
+            results, _ = self._store.client.scroll(
                 collection_name=collection_name,
                 limit=limit,
                 with_payload=True,
@@ -276,7 +277,17 @@ class ConsolidationEngine:
         """Find potential quality issues (very short content, possible secrets)."""
         warnings = []
 
-        SECRET_PATTERNS = ["sk-", "api_key", "token", "password", "secret", "BEGIN RSA", "BEGIN OPENSSH"]
+        # More specific patterns to reduce false positives
+        # (e.g., "sk-learn" won't match, but "sk-proj-abc123" will)
+        SECRET_PATTERNS = [
+            r'\bsk-[a-zA-Z]{2,20}-[a-zA-Z0-9]{10,}\b',  # OpenAI-style keys
+            r'\bapi[_-]?key\s*[=:]\s*["\']?[a-zA-Z0-9]{16,}',  # api_key=xxx (with value)
+            r'\btoken\s*[=:]\s*["\']?[a-zA-Z0-9]{20,}',  # token=xxx (with value)
+            r'\bpassword\s*[=:]\s*["\']?[^\s"\']{8,}',  # password=xxx (with value)
+            r'-----BEGIN [A-Z ]+ PRIVATE KEY-----',  # PEM private keys
+            r'\bAKIA[A-Z0-9]{16}\b',  # AWS access key IDs
+            r'\bghp_[a-zA-Z0-9]{36}\b',  # GitHub personal access tokens
+        ]
         for p in points:
             content = p.get("content", "")
             issues = []
@@ -285,11 +296,10 @@ class ConsolidationEngine:
             if len(content) < 20 and p.get("source_type") != "file":
                 issues.append("very_short_content")
 
-            # Possible secrets
-            lower = content.lower()
+            # Possible secrets — use regex matching
             for pattern in SECRET_PATTERNS:
-                if pattern.lower() in lower:
-                    issues.append(f"possible_secret:{pattern}")
+                if re.search(pattern, content):
+                    issues.append(f"possible_secret:{pattern[:30]}")
                     break
 
             if issues:

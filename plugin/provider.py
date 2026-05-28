@@ -243,9 +243,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 recency_weight = args.get("recency_weight", None)
                 if recency_weight is not None:
                     recency_weight = float(recency_weight)
+                tags = args.get("tags", None)
                 results = self._store.search(
                     query, top_k=top_k, user_id=self._user_id,
-                    recency_weight=recency_weight,
+                    recency_weight=recency_weight, tags=tags,
                 )
                 self._record_success()
                 if not results:
