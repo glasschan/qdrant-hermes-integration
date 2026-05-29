@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 # localhost Qdrant + API key triggers a benign warning about insecure
-# connection. The traffic never leaves the machine — suppress it.
-warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
+# connection. The traffic never leaves the machine — suppress locally.
+import warnings
 
 from .config import VECTOR_DIM, DEDUP_THRESHOLD, DEDUP_ENABLED
 from .embeddings import embed
@@ -40,7 +40,9 @@ class QdrantStore:
         self._models = models
         url = config["qdrant_url"]
         api_key = config.get("qdrant_api_key") or None
-        self._client = QdrantClient(url=url, api_key=api_key, timeout=10)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", message="Api key is used with an insecure connection")
+            self._client = QdrantClient(url=url, api_key=api_key, timeout=10)
         self._config = config
         self._collection = self._ensure_collection()
         self._ensure_payload_indexes()

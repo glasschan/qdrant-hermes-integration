@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DUPLICATE_THRESHOLD = 0.92       # cosine similarity threshold for duplicates
 STALE_DAYS = 90                  # memories older than this are "stale"
-MIN_IMPORTANCE_FOR_KEEP = 4      # below this + stale = low-value candidate
+MIN_PRIORITY_FOR_STALE = 4      # priority >= this + stale = low-value candidate
 MAX_POINTS_TO_SCAN = 500
 MAX_DUPLICATE_GROUPS = 20
 STALE_CATEGORIES_TO_SKIP = ["conversation"]  # always flag these as stale
@@ -34,18 +34,15 @@ class ConsolidationEngine:
 
     def __init__(
         self,
-        store,          # _QdrantStore instance
+        store,          # QdrantStore instance
         embed_fn,       # embedding function
-        learning_store=None,  # optional LearningStore
     ):
         self._store = store
         self._embed = embed_fn
-        self._learning = learning_store
         self._collection = store.collection
 
     def consolidate(
         self,
-        scope: str = "memory",          # "memory" | "learning" | "both"
         max_points: int = MAX_POINTS_TO_SCAN,
         max_groups: int = MAX_DUPLICATE_GROUPS,
         include_examples: bool = False,
@@ -55,7 +52,6 @@ class ConsolidationEngine:
         Returns:
             report_id: str
             generated_at: str (ISO timestamp)
-            scope: str
             points_scanned: int
             proposals: list[dict] — each a suggested action (duplicate, stale, quality)
             total_proposals: int
@@ -65,30 +61,19 @@ class ConsolidationEngine:
 
         proposals = []
 
-        if scope in ("memory", "both"):
-            # Scan main memory collection
-            mem_proposals = self._scan_collection(
-                self._collection,
-                max_points=max_points,
-                max_groups=max_groups,
-                include_examples=include_examples,
-            )
-            proposals.extend(mem_proposals)
-
-        if scope in ("learning", "both") and self._learning:
-            # Scan learning collection
-            learn_proposals = self._scan_collection(
-                self._learning.collection_name,
-                max_points=max_points,
-                max_groups=max_groups,
-                include_examples=include_examples,
-            )
-            proposals.extend(learn_proposals)
+        # Scan main memory collection
+        mem_proposals = self._scan_collection(
+            self._collection,
+            max_points=max_points,
+            max_groups=max_groups,
+            include_examples=include_examples,
+        )
+        proposals.extend(mem_proposals)
 
         return {
             "report_id": report_id,
             "generated_at": now,
-            "scope": scope,
+            "collection": self._collection,
             "points_scanned": sum(p.get("points_considered", 0) for p in proposals) or max_points,
             "proposals": proposals,
             "total_proposals": len(proposals),
@@ -195,7 +180,7 @@ class ConsolidationEngine:
                     "version": int(r.payload.get("version", 1)),
                     "created_at": r.payload.get("created_at", ""),
                     "updated_at": r.payload.get("updated_at", r.payload.get("created_at", "")),
-                    "importance": int(r.payload.get("importance", 5)),
+                    "priority": int(r.payload.get("priority", 3)),
                     "source_type": r.payload.get("source_type", ""),
                     "vector": r.vector,
                 }
@@ -259,7 +244,7 @@ class ConsolidationEngine:
         return groups
 
     def _find_stale(self, points: list[dict], include_examples: bool) -> list[dict]:
-        """Find old, low-importance memories."""
+        """Find old, low-priority memories (priority >= MIN_PRIORITY_FOR_STALE)."""
         stale = []
         cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
 
@@ -279,15 +264,16 @@ class ConsolidationEngine:
             if category in STALE_CATEGORIES_TO_SKIP:
                 continue
 
-            importance = int(p.get("importance", 5))
-            if created_dt < cutoff and importance < MIN_IMPORTANCE_FOR_KEEP:
+            priority = int(p.get("priority", 3))
+            # Higher priority = lower number. Low priority (4-5) + stale = candidate.
+            if created_dt < cutoff and priority >= MIN_PRIORITY_FOR_STALE:
                 stale.append({
                     "id": p["id"],
                     "content_preview": p["content"][:80],
                     "category": category,
                     "tags": p.get("tags", []),
                     "version": int(p.get("version", 1)),
-                    "importance": importance,
+                    "priority": priority,
                     "created_at": p["created_at"],
                     "updated_at": p.get("updated_at", ""),
                     "age_days": (datetime.now(timezone.utc) - created_dt).days,

@@ -1,6 +1,6 @@
 """QdrantMemoryProvider — main MemoryProvider implementation.
 
-Wires together QdrantStore, FileIndexer, LearningStore, ConsolidationEngine.
+Wires together QdrantStore, FileIndexer, ConsolidationEngine.
 All tool handling lives here. Schema definitions live in schemas.py.
 """
 
@@ -85,9 +85,7 @@ class QdrantMemoryProvider(MemoryProvider):
         _efn = lambda texts: embed(texts, self._config)
 
         self._indexer = FileIndexer(self._store, embed_fn=_efn, config=self._config)
-        self._consolidation = ConsolidationEngine(
-            self._store, embed_fn=_efn, learning_store=None
-        )
+        self._consolidation = ConsolidationEngine(self._store, embed_fn=_efn)
 
         # Register hooks with the REAL PluginManager (not the _ProviderCollector
         # stub that silently no-ops register_hook).  The memory provider loading
@@ -136,13 +134,31 @@ class QdrantMemoryProvider(MemoryProvider):
         try:
             from hermes_cli.plugins import get_plugin_manager
             pm = get_plugin_manager()
-            pm._hooks.setdefault("pre_llm_call", []).append(self.on_pre_llm_call)
-            pm._hooks.setdefault("post_llm_call", []).append(self.on_post_llm_call)
-            pm._hooks.setdefault("on_session_end", []).append(self.on_session_end_hook)
-            logger.info(
-                "Qdrant: registered 3 hooks with PluginManager "
-                "(pre_llm_call, post_llm_call, on_session_end)"
-            )
+
+            # Dedup guard: Hermes may instantiate QdrantMemoryProvider multiple
+            # times per session (memory provider path + plugin tools path), each
+            # calling initialize().  Without this check, hooks accumulate and
+            # fire N times per turn (double embedding cost, double sync).
+            _to_register = {
+                "pre_llm_call": self.on_pre_llm_call,
+                "post_llm_call": self.on_post_llm_call,
+                "on_session_end": self.on_session_end_hook,
+            }
+            _registered = 0
+            for hook_name, handler in _to_register.items():
+                existing = pm._hooks.get(hook_name, [])
+                if handler not in existing:
+                    existing.append(handler)
+                    _registered += 1
+
+            if _registered:
+                logger.info(
+                    "Qdrant: registered %d hooks with PluginManager "
+                    "(pre_llm_call, post_llm_call, on_session_end)",
+                    _registered,
+                )
+            else:
+                logger.debug("Qdrant: hooks already registered — skipping duplicate")
         except Exception as e:
             logger.warning("Qdrant: failed to register hooks with PluginManager: %s", e)
 
@@ -151,6 +167,16 @@ class QdrantMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         coll = self._store.collection if self._store else "?"
         dedup = self._config.get("dedup_enabled", True) if self._config else True
+
+        # Read version from VERSION file
+        version = "?.?"
+        try:
+            from pathlib import Path
+            vfile = Path(__file__).parent / "VERSION"
+            if vfile.exists():
+                version = vfile.read_text(encoding="utf-8").strip().lstrip("v")
+        except Exception:
+            pass
 
         # Memory stats
         stats = ""
@@ -171,7 +197,7 @@ class QdrantMemoryProvider(MemoryProvider):
             pass
 
         return (
-            "# Qdrant Memory (Self-Healing v0.6.0)\n"
+            f"# Qdrant Memory (Self-Healing v{version})\n"
             f"Active. Collection: {coll} (dim={VECTOR_DIM}).{stats}\n"
             f"Dedup: {'ON' if dedup else 'OFF'}. Auto-context: ON (top {PREFETCH_TOP_K}).\n"
             "Categories: preference, fact, decision, goal, instruction, correction.\n"
@@ -185,7 +211,11 @@ class QdrantMemoryProvider(MemoryProvider):
             "with priority=1 so it surfaces first in future turns."
         )
 
-    # ── Prefetch ──────────────────────────────────────────────────────────
+    # ── Prefetch (memory_manager path — legacy) ──────────────────────────
+    #
+    # Hermes memory_manager calls provider.prefetch() at line 348.
+    # The hook path (on_pre_llm_call) does its own independent search.
+    # Both paths coexist — belt-and-suspenders dispatch.
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._prefetch_thread and self._prefetch_thread.is_alive():
@@ -400,7 +430,6 @@ class QdrantMemoryProvider(MemoryProvider):
                 if not self._consolidation:
                     return tool_error("Consolidation engine not initialized")
                 result = self._consolidation.consolidate(
-                    scope=args.get("scope", "memory"),
                     max_points=int(args.get("max_points", 500)),
                     max_groups=int(args.get("max_groups", 20)),
                     include_examples=bool(args.get("include_examples", False)),

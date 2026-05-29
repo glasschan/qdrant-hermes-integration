@@ -133,11 +133,6 @@ CONSOLIDATE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "scope": {
-                "type": "string",
-                "description": "Which collections to scan: memory, learning, or both.",
-                "enum": ["memory", "learning", "both"],
-            },
             "max_points": {
                 "type": "integer",
                 "description": "Max points to scan (default: 500).",
