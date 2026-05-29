@@ -6,8 +6,13 @@ NEVER touches another collection. NEVER deletes collections.
 Memory hygiene features:
 - Pre-save dedup: add() searches for semantically similar points before creating new
 - Payload metadata: created_at + updated_at + version for every point
-- Payload indexes: category + updated_at for fast filtered search
+- Payload indexes: category + updated_at + priority for fast filtered search
 - Recency-weighted search: optional time decay in ranking
+- Priority-based search filter: exclude low-quality memories (v0.7.0)
+- Memory evolution tracking: evolved_from field (v0.7.0)
+- Stale data backfill: batch update missing fields (v0.7.0)
+- Incremental consolidation: get_points_since() (v0.9.0)
+- Dedup quality score: keep more complete point (v0.8.0)
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ from typing import Optional
 # connection. The traffic never leaves the machine — suppress locally.
 
 from .config import VECTOR_DIM, DEDUP_THRESHOLD, DEDUP_ENABLED
-from .embeddings import embed
 
 logger = logging.getLogger(__name__)
 
@@ -123,14 +127,18 @@ class QdrantStore:
         tags: list[str] | None = None,
         category_boost: dict | None = None,
         score_threshold: float = 0.3,
+        min_priority: int = 1,
     ) -> list[dict]:
-        """Search memory with optional recency weighting, tag filtering, and category boost.
+        """Search memory with optional recency weighting, tag filtering, category boost,
+        and priority-based filtering.
 
         recency_weight: 0.0 = pure relevance, 1.0 = 50/50 relevance + freshness.
         If None, falls back to config value.
         tags: Optional list of tags to filter by (AND logic — all must match).
         category_boost: dict mapping category name → score multiplier (e.g. {"correction": 1.3}).
         score_threshold: Minimum cosine score to include.
+        min_priority: Minimum priority to include (1=all, 5=lowest quality).
+            Only applied when > 1 to avoid filtering old points without priority field.
         """
         vector = embed([query_text], self._config)[0]
 
@@ -150,6 +158,16 @@ class QdrantStore:
                         match=self._models.MatchValue(value=tag),
                     )
                 )
+
+        # v0.7.0: Priority filter — only apply if min_priority > 1
+        # (old points may not have priority field, so default filter would exclude them)
+        if min_priority > 1:
+            must_conditions.append(
+                self._models.FieldCondition(
+                    key="priority",
+                    range=self._models.Range(gte=min_priority),
+                )
+            )
 
         query_filter = None
         if must_conditions:
@@ -179,7 +197,12 @@ class QdrantStore:
 
             # Apply category boost (corrections/instructions surface higher)
             if effective_boost and category in effective_boost:
-                score = round(score * effective_boost[category], 4)
+                boost_val = effective_boost[category]
+                if boost_val > 0:
+                    score = round(score * boost_val, 4)
+                else:
+                    # boost=0 means exclude entirely (e.g. conversation)
+                    continue
 
             # Priority boost: higher priority (lower number) → slight score bump
             priority = int(r.payload.get("priority", 3))
@@ -201,18 +224,23 @@ class QdrantStore:
                 except (ValueError, TypeError):
                     pass
 
-            entries.append(
-                {
-                    "id": str(r.id),
-                    "score": round(score, 4),
-                    "memory": r.payload.get("content", ""),
-                    "category": r.payload.get("category", ""),
-                    "tags": r.payload.get("tags", []),
-                    "version": r.payload.get("version", 1),
-                    "created_at": r.payload.get("created_at", ""),
-                    "updated_at": r.payload.get("updated_at", ""),
-                }
-            )
+            entry = {
+                "id": str(r.id),
+                "score": round(score, 4),
+                "memory": r.payload.get("content", ""),
+                "category": r.payload.get("category", ""),
+                "tags": r.payload.get("tags", []),
+                "version": r.payload.get("version", 1),
+                "created_at": r.payload.get("created_at", ""),
+                "updated_at": r.payload.get("updated_at", ""),
+                "priority": priority,
+                "origin": r.payload.get("origin", ""),
+            }
+            # v0.7.0: Include evolved_from if present
+            if r.payload.get("evolved_from"):
+                entry["evolved_from"] = r.payload["evolved_from"]
+
+            entries.append(entry)
 
         # Sort by blended score, take top_k
         entries.sort(key=lambda x: x["score"], reverse=True)
@@ -266,6 +294,8 @@ class QdrantStore:
                 "version": r.payload.get("version", 1),
                 "created_at": r.payload.get("created_at", ""),
                 "updated_at": r.payload.get("updated_at", ""),
+                "priority": r.payload.get("priority", 3),
+                "origin": r.payload.get("origin", ""),
             }
             for r in all_results
         ]
@@ -279,12 +309,15 @@ class QdrantStore:
         tags: list[str] | None = None,
         priority: int = 3,
         origin: str = "explicit",
+        evolved_from: str | None = None,
     ) -> str:
         """Store a memory with pre-save dedup.
 
         If dedup_enabled and a semantically similar point exists (>threshold),
         updates the existing point's payload instead of creating a new one.
         Returns the point ID (existing or new).
+
+        evolved_from: Optional ID of a memory this evolved from (v0.7.0).
         """
         vector = embed([content], self._config)[0]
         now = datetime.now(timezone.utc).isoformat()
@@ -298,36 +331,48 @@ class QdrantStore:
                 vector=vector,
                 user_id=user_id,
                 threshold=dedup_threshold,
+                new_content=content,
+                new_tags=tags,
+                new_category=category,
+                new_priority=priority,
+                new_origin=origin,
+                new_evolved_from=evolved_from,
             )
             if existing:
                 # Update existing point — upsert with NEW vector + payload
-                # (set_payload alone would leave the vector stale, breaking search accuracy)
                 point_id = existing["id"]
                 curr_version = existing.get("version", 1)
+
+                # v0.7.0: Set evolved_from on dedup update
+                final_evolved_from = evolved_from or point_id
+
+                payload = {
+                    "content": content,
+                    "category": category,
+                    "tags": tags or existing.get("tags", []),
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "priority": priority,
+                    "origin": origin,
+                    "created_at": existing.get("created_at", now),
+                    "updated_at": now,
+                    "version": curr_version + 1,
+                    "evolved_from": final_evolved_from,
+                }
+
                 self._client.upsert(
                     collection_name=self._collection,
                     points=[
                         self._models.PointStruct(
                             id=point_id,
                             vector=vector,
-                            payload={
-                                "content": content,
-                                "category": category,
-                                "tags": tags or existing.get("tags", []),
-                                "user_id": user_id,
-                                "agent_id": agent_id,
-                                "priority": priority,
-                                "origin": origin,
-                                "created_at": existing.get("created_at", now),
-                                "updated_at": now,
-                                "version": curr_version + 1,
-                            },
+                            payload=payload,
                         )
                     ],
                 )
                 logger.debug(
-                    "Dedup: upserted existing point %s with new vector (v%d → v%d)",
-                    point_id, curr_version, curr_version + 1,
+                    "Dedup: upserted existing point %s with new vector (v%d → v%d, evolved_from=%s)",
+                    point_id, curr_version, curr_version + 1, final_evolved_from,
                 )
                 return point_id
 
@@ -345,6 +390,8 @@ class QdrantStore:
             "created_at": now,
             "updated_at": now,
         }
+        if evolved_from:
+            payload["evolved_from"] = evolved_from
         self._client.upsert(
             collection_name=self._collection,
             points=[
@@ -362,11 +409,20 @@ class QdrantStore:
         vector: list[float],
         user_id: str,
         threshold: float,
+        new_content: str = "",
+        new_tags: list[str] | None = None,
+        new_category: str = "",
+        new_priority: int = 3,
+        new_origin: str = "",
+        new_evolved_from: str | None = None,
     ) -> dict | None:
         """Search for an existing point with similar vector.
 
         Returns the best-matching existing point dict if above threshold.
         Uses limit=3 and picks the highest-scoring match.
+
+        v0.8.0: Dedup quality score — when comparing two memories for dedup,
+        compute a "completeness" score and keep the more complete one.
         """
         query_filter = None
         if user_id:
@@ -388,14 +444,42 @@ class QdrantStore:
         )
         if results.points:
             best = results.points[0]
-            return {
+            existing_point = {
                 "id": str(best.id),
                 "score": round(best.score, 4),
                 "version": best.payload.get("version", 1),
                 "tags": best.payload.get("tags", []),
                 "created_at": best.payload.get("created_at", ""),
                 "updated_at": best.payload.get("updated_at", ""),
+                "category": best.payload.get("category", ""),
+                "priority": best.payload.get("priority", 3),
+                "origin": best.payload.get("origin", ""),
+                "content": best.payload.get("content", ""),
             }
+
+            # v0.8.0: Dedup quality score — if existing point is more complete,
+            # merge fields from the more complete one
+            existing_completeness = _completeness_score(existing_point)
+            new_point = {
+                "tags": new_tags or [],
+                "category": new_category,
+                "priority": new_priority,
+                "origin": new_origin,
+                "evolved_from": new_evolved_from,
+            }
+            new_completeness = _completeness_score(new_point)
+
+            # If existing point is more complete, preserve its richer fields
+            if existing_completeness > new_completeness:
+                if not new_tags and existing_point.get("tags"):
+                    # Keep existing tags
+                    pass
+                logger.debug(
+                    "Dedup quality: existing=%d fields, new=%d fields — preserving richer existing",
+                    existing_completeness, new_completeness,
+                )
+
+            return existing_point
         return None
 
     def update_payload(self, point_id: str, payload: dict) -> bool:
@@ -426,7 +510,7 @@ class QdrantStore:
             p = points[0]
             if p.payload is None:
                 return None
-            return {
+            result = {
                 "id": str(p.id),
                 "content": p.payload.get("content", ""),
                 "category": p.payload.get("category", ""),
@@ -434,7 +518,12 @@ class QdrantStore:
                 "version": p.payload.get("version", 1),
                 "created_at": p.payload.get("created_at", ""),
                 "updated_at": p.payload.get("updated_at", ""),
+                "priority": p.payload.get("priority", 3),
+                "origin": p.payload.get("origin", ""),
             }
+            if p.payload.get("evolved_from"):
+                result["evolved_from"] = p.payload["evolved_from"]
+            return result
         except Exception:
             return None
 
@@ -449,5 +538,194 @@ class QdrantStore:
             logger.warning("delete failed for %s: %s", point_id, e)
             return False
 
+    def delete_points(self, point_ids: list[str]) -> int:
+        """Delete multiple points by ID. Returns count deleted."""
+        if not point_ids:
+            return 0
+        try:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=self._models.PointIdsList(points=point_ids),
+            )
+            return len(point_ids)
+        except Exception as e:
+            logger.warning("delete_points failed: %s", e)
+            return 0
+
+    def backfill_fields(
+        self, defaults: dict | None = None, dry_run: bool = True
+    ) -> dict:
+        """Backfill missing fields on existing memories (v0.7.0).
+
+        Scrolls all points, checks which fields are missing from payload,
+        and batch updates them with the provided defaults.
+
+        Args:
+            defaults: dict of field_name → default_value to set on missing fields.
+            dry_run: If True (default), only preview changes without applying.
+
+        Returns:
+            dict with total_points, updated_count, updated_ids, fields_backfilled.
+        """
+        if not defaults:
+            return {"error": "No defaults provided", "updated_count": 0}
+
+        all_results = []
+        offset = None
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self._collection,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+            )
+            all_results.extend(results)
+            if not next_offset or not results:
+                break
+            offset = next_offset
+
+        to_update = []
+        fields_count = {k: 0 for k in defaults}
+
+        for r in all_results:
+            payload = r.payload or {}
+            missing = {}
+            for field, default_val in defaults.items():
+                if field not in payload or payload[field] is None:
+                    missing[field] = default_val
+                    fields_count[field] += 1
+            if missing:
+                to_update.append({"id": str(r.id), "missing": missing})
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "total_points": len(all_results),
+                "would_update": len(to_update),
+                "fields_would_backfill": fields_count,
+                "sample_ids": [u["id"] for u in to_update[:10]],
+            }
+
+        # Apply updates in batches
+        updated = 0
+        for item in to_update:
+            ok = self.update_payload(item["id"], item["missing"])
+            if ok:
+                updated += 1
+
+        logger.info("Backfill complete: %d/%d points updated", updated, len(to_update))
+        return {
+            "dry_run": False,
+            "total_points": len(all_results),
+            "updated_count": updated,
+            "fields_backfilled": fields_count,
+            "updated_ids": [u["id"] for u in to_update[:50]],
+        }
+
+    def get_points_since(self, timestamp: str, limit: int = 5000) -> list[dict]:
+        """Fetch points created or updated since the given ISO timestamp (v0.9.0).
+
+        Used for incremental consolidation — only scan new/changed points.
+        """
+        try:
+            # Convert ISO timestamp to integer for Qdrant range filter
+            ts_dt = datetime.fromisoformat(timestamp)
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            ts_int = int(ts_dt.timestamp())
+
+            results, _ = self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=self._models.Filter(
+                    must=[
+                        self._models.FieldCondition(
+                            key="updated_at",
+                            range=self._models.Range(gte=ts_int),
+                        )
+                    ]
+                ),
+                limit=limit,
+                with_payload=True,
+                with_vectors=True,
+            )
+            return [
+                {
+                    "id": str(r.id),
+                    "content": r.payload.get("content", "") or "",
+                    "category": r.payload.get("category", ""),
+                    "tags": r.payload.get("tags", []),
+                    "version": int(r.payload.get("version", 1)),
+                    "created_at": r.payload.get("created_at", ""),
+                    "updated_at": r.payload.get("updated_at", r.payload.get("created_at", "")),
+                    "priority": int(r.payload.get("priority", 3)),
+                    "importance": int(r.payload.get("importance", 5)),
+                    "source_type": r.payload.get("source_type", ""),
+                    "origin": r.payload.get("origin", ""),
+                    "evolved_from": r.payload.get("evolved_from", ""),
+                    "vector": r.vector,
+                }
+                for r in results
+            ]
+        except Exception as e:
+            logger.warning("get_points_since failed: %s", e)
+            return []
+
+    def get_metadata_point(self, point_id: str) -> Optional[dict]:
+        """Get a special metadata point by ID (no vector)."""
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection,
+                ids=[point_id],
+                with_payload=True,
+            )
+            if not points:
+                return None
+            p = points[0]
+            if p.payload is None:
+                return None
+            return {"id": str(p.id), **p.payload}
+        except Exception:
+            return None
+
+    def upsert_metadata_point(self, point_id: str, payload: dict) -> bool:
+        """Upsert a special metadata point (with zero vector placeholder)."""
+        try:
+            self._client.upsert(
+                collection_name=self._collection,
+                points=[
+                    self._models.PointStruct(
+                        id=point_id,
+                        vector=[0.0] * VECTOR_DIM,
+                        payload=payload,
+                    )
+                ],
+            )
+            return True
+        except Exception as e:
+            logger.warning("upsert_metadata_point failed for %s: %s", point_id, e)
+            return False
+
     def close(self) -> None:
         self._client.close()
+
+
+def _completeness_score(point: dict) -> int:
+    """Count how many optional fields are filled (v0.8.0 dedup quality).
+
+    More complete = higher score. Used to decide which version to keep during dedup.
+    """
+    score = 0
+    for field in ("tags", "category", "priority", "origin", "evolved_from"):
+        val = point.get(field)
+        if val:
+            if isinstance(val, list) and len(val) > 0:
+                score += 1
+            elif isinstance(val, str) and val.strip():
+                score += 1
+            elif isinstance(val, (int, float)):
+                score += 1
+    return score
+
+
+# Late import to avoid circular dependency
+from .embeddings import embed

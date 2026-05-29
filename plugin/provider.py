@@ -2,14 +2,20 @@
 
 Wires together QdrantStore, FileIndexer, LearningStore, ConsolidationEngine.
 All tool handling lives here. Schema definitions live in schemas.py.
+
+v0.7.0: backfill tool, min_priority search, evolved_from remember, quick consolidate
+v0.8.0: topics tool, session-end auto-extract, smart prefetch (skip short convos)
+v0.9.0: cross-session context bridge, auto-stale/prune
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -22,6 +28,8 @@ from .config import (
     AUTO_SYNC_CONVERSATIONS,
     PREFETCH_TOP_K,
     PREFETCH_SCORE_THRESHOLD,
+    PREFETCH_MIN_TURNS,
+    SEARCH_MIN_PRIORITY,
     load_config,
 )
 from .embeddings import embed
@@ -32,6 +40,8 @@ from .schemas import (
     FORGET_SCHEMA,
     INDEX_SCHEMA,
     CONSOLIDATE_SCHEMA,
+    BACKFILL_SCHEMA,
+    TOPICS_SCHEMA,
 )
 from .store import QdrantStore
 from .indexer import FileIndexer
@@ -207,8 +217,12 @@ class QdrantMemoryProvider(MemoryProvider):
             "qdrant_profile for a full overview, qdrant_forget to delete.\n"
             "qdrant_remember accepts: category (use 'correction' for behavior fixes), "
             "priority (1-5), origin ('user_correction'|'agent_discovery'|'explicit'|'auto'), "
-            "tags (string array for filtering).\n"
-            "qdrant_search accepts: recency_weight (0.0-1.0), tags (AND filter).\n"
+            "tags (string array for filtering), evolved_from (ID of source memory).\n"
+            "qdrant_search accepts: recency_weight (0.0-1.0), tags (AND filter), "
+            "min_priority (1=all, 5=highest quality only).\n"
+            "qdrant_consolidate accepts: quick (skip dedup), auto_stale, auto_prune.\n"
+            "qdrant_backfill: backfill missing fields on old memories.\n"
+            "qdrant_topics: discover topic clusters in your memories.\n"
             "IMPORTANT: When user corrects your behavior, store it as category='correction' "
             "with priority=1 so it surfaces first in future turns."
         )
@@ -232,6 +246,10 @@ class QdrantMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if self._is_breaker_open() or not self._store:
             return
+
+        # v0.8.0: Smart prefetch — skip short conversations
+        # (Don't count query length — we don't have conversation history here)
+        # The on_pre_llm_call hook handles the full smart-prefetch logic
 
         top_k = int(self._config.get("prefetch_top_k", PREFETCH_TOP_K)) if self._config else PREFETCH_TOP_K
         score_threshold = float(self._config.get("prefetch_score_threshold", PREFETCH_SCORE_THRESHOLD)) if self._config else PREFETCH_SCORE_THRESHOLD
@@ -263,8 +281,11 @@ class QdrantMemoryProvider(MemoryProvider):
                                 meta = f"{meta}/P{pri}"
                             if origin == "user_correction":
                                 meta = f"⚠️{meta}"
+                            evolved = ""
+                            if r.get("evolved_from"):
+                                evolved = f" [evolved from {r['evolved_from'][:8]}]"
                             lines.append(
-                                f"- [{meta}] {r['memory']} (score: {r['score']})"
+                                f"- [{meta}] {r['memory']}{evolved} (score: {r['score']})"
                             )
                         with self._prefetch_lock:
                             self._prefetch_result = "\n".join(lines)
@@ -316,6 +337,8 @@ class QdrantMemoryProvider(MemoryProvider):
             PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA,
             INDEX_SCHEMA,
             CONSOLIDATE_SCHEMA,
+            BACKFILL_SCHEMA,
+            TOPICS_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
@@ -353,23 +376,30 @@ class QdrantMemoryProvider(MemoryProvider):
                 if recency_weight is not None:
                     recency_weight = float(recency_weight)
                 tags = args.get("tags", None)
+                # v0.7.0: min_priority filter
+                min_priority = int(args.get("min_priority", 1))
                 results = self._store.search(
                     query, top_k=top_k, user_id=self._user_id,
                     recency_weight=recency_weight, tags=tags,
+                    min_priority=min_priority,
                 )
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
-                items = [
-                    {
+                items = []
+                for r in results:
+                    item = {
                         "memory": r["memory"],
                         "score": r["score"],
                         "category": r.get("category", ""),
                         "tags": r.get("tags", []),
                         "version": r.get("version", 1),
+                        "priority": r.get("priority", 3),
                     }
-                    for r in results
-                ]
+                    # v0.7.0: Include evolved_from if present
+                    if r.get("evolved_from"):
+                        item["evolved_from"] = r["evolved_from"]
+                    items.append(item)
                 return json.dumps({"results": items, "count": len(items)})
 
             elif tool_name == "qdrant_remember":
@@ -380,13 +410,25 @@ class QdrantMemoryProvider(MemoryProvider):
                 tags = args.get("tags", None)
                 priority = min(max(int(args.get("priority", 3)), 1), 5)
                 origin = args.get("origin", "explicit")
+                # v0.7.0: evolved_from parameter
+                evolved_from = args.get("evolved_from", None)
                 point_id = self._store.add(
                     content=content, user_id=self._user_id,
                     agent_id=self._agent_id, category=category,
                     tags=tags, priority=priority, origin=origin,
+                    evolved_from=evolved_from,
                 )
                 self._record_success()
-                return json.dumps({"result": "Memory stored.", "id": point_id, "priority": priority, "category": category, "origin": origin})
+                result = {
+                    "result": "Memory stored.",
+                    "id": point_id,
+                    "priority": priority,
+                    "category": category,
+                    "origin": origin,
+                }
+                if evolved_from:
+                    result["evolved_from"] = evolved_from
+                return json.dumps(result)
 
             elif tool_name == "qdrant_forget":
                 point_id = args.get("point_id", "")
@@ -431,14 +473,86 @@ class QdrantMemoryProvider(MemoryProvider):
             elif tool_name == "qdrant_consolidate":
                 if not self._consolidation:
                     return tool_error("Consolidation engine not initialized")
+                # v0.9.0: auto_stale and auto_prune require config-level enable
+                auto_stale = args.get("auto_stale", False)
+                auto_prune = args.get("auto_prune", False)
+                if auto_stale and not self._config.get("auto_stale_enabled", False):
+                    auto_stale = False
+                    logger.info("auto_stale requested but QDRANT_AUTO_STALE not enabled")
+                if auto_prune and not self._config.get("auto_prune_enabled", False):
+                    auto_prune = False
+                    logger.info("auto_prune requested but QDRANT_AUTO_PRUNE not enabled")
                 result = self._consolidation.consolidate(
                     scope=args.get("scope", "memory"),
                     max_points=int(args.get("max_points", 500)),
                     max_groups=int(args.get("max_groups", 20)),
                     include_examples=bool(args.get("include_examples", False)),
+                    quick=bool(args.get("quick", False)),
+                    auto_stale=auto_stale,
+                    auto_prune=auto_prune,
                 )
                 self._record_success()
                 return json.dumps(result)
+
+            # ── Backfill (v0.7.0) ──────────────────────────────────────
+            elif tool_name == "qdrant_backfill":
+                defaults = args.get("defaults", {})
+                if not defaults:
+                    return tool_error("Missing required parameter: defaults")
+                dry_run = args.get("dry_run", True)
+                result = self._store.backfill_fields(
+                    defaults=defaults, dry_run=dry_run,
+                )
+                self._record_success()
+                return json.dumps(result)
+
+            # ── Topics (v0.8.0) ────────────────────────────────────────
+            elif tool_name == "qdrant_topics":
+                if not self._consolidation:
+                    return tool_error("Consolidation engine not initialized")
+                min_cluster_size = int(args.get("min_cluster_size", 2))
+                similarity_threshold = float(args.get("similarity_threshold", 0.75))
+                # Fetch points for clustering
+                points = self._store.get_all(user_id=self._user_id, limit=500)
+                if not points:
+                    return json.dumps({"result": "No memories to cluster.", "clusters": []})
+                # Need vectors for clustering — re-fetch with vectors
+                try:
+                    from .clustering import TopicClustering
+                    tc = TopicClustering(
+                        similarity_threshold=similarity_threshold,
+                        min_cluster_size=min_cluster_size,
+                    )
+                    # Fetch with vectors via consolidation engine
+                    all_points = self._consolidation._fetch_all_points(
+                        self._store.collection, 500
+                    )
+                    clusters = tc.find_clusters(all_points)
+                    self._record_success()
+                    if not clusters:
+                        return json.dumps({
+                            "result": "No topic clusters found.",
+                            "clusters": [],
+                            "points_analyzed": len(all_points),
+                        })
+                    # Format for output
+                    output_clusters = []
+                    for c in clusters:
+                        output_clusters.append({
+                            "topic": c["topic_label"],
+                            "size": c["size"],
+                            "avg_similarity": c["avg_similarity"],
+                            "categories": c.get("categories", []),
+                            "content_previews": c.get("content_previews", []),
+                        })
+                    return json.dumps({
+                        "result": f"Found {len(clusters)} topic clusters.",
+                        "clusters": output_clusters,
+                        "points_analyzed": len(all_points),
+                    })
+                except Exception as e:
+                    self._record_failure()
+                    return tool_error(f"Topic clustering failed: {e}")
 
             return tool_error(f"Unknown tool: {tool_name}")
 
@@ -461,6 +575,12 @@ class QdrantMemoryProvider(MemoryProvider):
             {"key": "dedup_enabled", "description": "Enable pre-save dedup (default: true)", "default": "true", "env_var": "QDRANT_DEDUP_ENABLED"},
             {"key": "auto_sync_conversations", "description": "Auto-save user messages to memory (default: false)", "default": "false", "env_var": "QDRANT_AUTO_SYNC"},
             {"key": "search_recency_weight", "description": "How much to favor recency in search results (0.0-1.0, default: 0.0)", "default": "0.0", "env_var": "QDRANT_RECENCY_WEIGHT"},
+            # v0.7.0+ new config
+            {"key": "prefetch_min_turns", "description": "Min user turns before prefetch starts (default: 3)", "default": "3", "env_var": "QDRANT_PREFETCH_MIN_TURNS"},
+            {"key": "search_min_priority", "description": "Min priority for search results (1=all, 5=highest quality, default: 1)", "default": "1", "env_var": "QDRANT_SEARCH_MIN_PRIORITY"},
+            # v0.9.0 lifecycle
+            {"key": "auto_stale_enabled", "description": "Enable auto-stale (bump old low-priority to 5, default: false)", "default": "false", "env_var": "QDRANT_AUTO_STALE"},
+            {"key": "auto_prune_enabled", "description": "Enable auto-prune (DELETE old priority-5 memories, default: false)", "default": "false", "env_var": "QDRANT_AUTO_PRUNE"},
         ]
 
     def save_config(self, values: dict, hermes_home: str) -> None:
@@ -495,7 +615,6 @@ class QdrantMemoryProvider(MemoryProvider):
             for k, v in secrets_to_env.items():
                 if v:
                     line = f"{k}={v}"
-                    import re
                     if re.search(rf"^{re.escape(k)}=", env_text, re.MULTILINE):
                         env_text = re.sub(rf"^{re.escape(k)}=.*", line, env_text, flags=re.MULTILINE)
                     else:
@@ -551,24 +670,81 @@ class QdrantMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Session-end hook for memory provider interface.
 
-        v0.6.1: Disabled auto-extraction of "Session topics" summaries.
-        These were polluting search results with low-value conversation
-        fragments that matched semantically but carried no useful signal.
-        Real valuable memories are stored via explicit qdrant_remember
-        calls (corrections, preferences, decisions).
+        v0.8.0: Smart auto-extraction of key facts from conversation.
+        Only extracts substantive user messages that contain facts/preferences/instructions.
+        Skips questions, tool outputs, and short messages.
+        Auto-extracted memories get category='auto_extract', priority=4.
         """
-        pass
+        if not self._config or not self._config.get("session_end_auto_extract", True):
+            return
+        if self._is_breaker_open() or not self._store:
+            return
 
-    # ── Hermes hook adapters (v0.6.1) ──────────────────────────────────
+        try:
+            extracted = 0
+            user_messages = [
+                m for m in messages
+                if m.get("role") == "user" and isinstance(m.get("content"), str)
+            ]
+
+            for msg in user_messages:
+                content = msg["content"].strip()
+                if len(content) < 50:
+                    continue  # Skip short messages
+
+                # Skip questions
+                if content.endswith("?") and content.count("?") >= 1:
+                    if len(content) < 100:  # Short questions are definitely not facts
+                        continue
+
+                # Skip tool output (JSON-like)
+                if content.startswith("{") and content.endswith("}"):
+                    continue
+                if content.startswith("[") and content.endswith("]"):
+                    continue
+
+                # Quick dedup check — search existing memories
+                try:
+                    existing = self._store.search(
+                        content[:200],
+                        top_k=3,
+                        user_id=self._user_id,
+                        score_threshold=0.85,
+                    )
+                    if existing:
+                        continue  # Already known
+                except Exception:
+                    pass
+
+                # Store as auto-extracted memory
+                try:
+                    self._store.add(
+                        content=content[:500],
+                        user_id=self._user_id,
+                        agent_id=self._agent_id,
+                        category="auto_extract",
+                        priority=4,
+                        origin="auto",
+                        tags=["session-extract", self._session_id[:8]] if self._session_id else ["session-extract"],
+                    )
+                    extracted += 1
+                except Exception:
+                    pass
+
+            if extracted > 0:
+                logger.info(
+                    "Session-end auto-extracted %d memories from %d user messages",
+                    extracted, len(user_messages),
+                )
+            self._record_success()
+        except Exception as e:
+            self._record_failure()
+            logger.debug("Session-end auto-extract failed: %s", e)
+
+    # ── Hermes hook adapters (v0.6.1+) ──────────────────────────────────
     #
     # These bridge the Hermes plugin hook system (invoke_hook) to the
-    # Qdrant memory provider's internal methods.  The hook path runs
-    # alongside the memory_manager path — belt-and-suspenders so that
-    # if the memory_manager dispatch silently fails, the hook dispatch
-    # still fires.
-    #
-    # Hook signatures must match what conversation_loop.py passes via
-    # invoke_hook(**kwargs).  Unknown kwargs are absorbed by **_kwargs.
+    # Qdrant memory provider's internal methods.
 
     def on_pre_llm_call(self, *, session_id: str = "",
                         user_message=None, conversation_history=None,
@@ -577,23 +753,41 @@ class QdrantMemoryProvider(MemoryProvider):
                         **_kwargs) -> dict:
         """pre_llm_call hook: return high-value memories for context injection.
 
-        v0.6.1: Completely independent of prefetch cache. Does a fresh
-        synchronous search and explicitly EXCLUDES conversation category
-        (auto-generated session summaries are noise, not memory).
+        v0.8.0: Smart prefetch — skip embedding search on short conversations.
+        v0.9.0: Cross-session context bridge — inject session starter on first turn.
         """
         logger.info(
-            "Qdrant pre_llm_call hook: called (store=%s, breaker=%s, msg_len=%d)",
+            "Qdrant pre_llm_call hook: called (store=%s, breaker=%s, msg_len=%d, first_turn=%s)",
             bool(self._store),
             self._is_breaker_open(),
             len(user_message) if isinstance(user_message, str) else 0,
+            is_first_turn,
         )
 
         if self._is_breaker_open() or not self._store:
             return {}
 
         query = user_message if isinstance(user_message, str) else ""
-        if not query:
+        if not query and not is_first_turn:
             return {}
+
+        # v0.9.0: Cross-session context bridge — first turn gets starter context
+        if is_first_turn:
+            return self._session_starter_context()
+
+        # v0.8.0: Smart prefetch — skip short conversations
+        min_turns = int(self._config.get("prefetch_min_turns", PREFETCH_MIN_TURNS)) if self._config else PREFETCH_MIN_TURNS
+        if conversation_history and min_turns > 0:
+            user_turns = len([
+                m for m in conversation_history
+                if m.get("role") == "user"
+            ])
+            if user_turns < min_turns:
+                logger.info(
+                    "Qdrant pre_llm_call: skipping prefetch (user_turns=%d < min_turns=%d)",
+                    user_turns, min_turns,
+                )
+                return {}
 
         try:
             top_k = int(self._config.get("prefetch_top_k", PREFETCH_TOP_K)) if self._config else PREFETCH_TOP_K
@@ -616,6 +810,7 @@ class QdrantMemoryProvider(MemoryProvider):
             filtered = [
                 r for r in results
                 if r.get("category") != "conversation"
+                and r.get("category") != "auto_extract"  # v0.8.0: don't surface auto-extracts in prefetch
                 and r["score"] >= MIN_SCORE
             ]
 
@@ -633,8 +828,11 @@ class QdrantMemoryProvider(MemoryProvider):
                     meta = f"{meta}/P{pri}"
                 if origin == "user_correction":
                     meta = f"⚠️{meta}"
+                evolved = ""
+                if r.get("evolved_from"):
+                    evolved = f" [evolved]"
                 lines.append(
-                    f"- [{meta}] {r['memory']} (score: {r['score']})"
+                    f"- [{meta}] {r['memory']}{evolved} (score: {r['score']})"
                 )
             context = "## Qdrant Memory\n" + "\n".join(lines)
             logger.info(
@@ -645,6 +843,86 @@ class QdrantMemoryProvider(MemoryProvider):
             return {"context": context}
         except Exception as e:
             logger.debug("Qdrant pre_llm_call direct search failed: %s", e)
+            return {}
+
+    def _session_starter_context(self) -> dict:
+        """v0.9.0: Cross-session context bridge.
+
+        On first turn, inject session starter context:
+        - Top highest-priority memories (corrections > instructions > preferences)
+        - Recent memories from last 24 hours
+        """
+        try:
+            top_k = int(self._config.get("prefetch_top_k", PREFETCH_TOP_K)) if self._config else PREFETCH_TOP_K
+
+            # Get top-priority memories using empty-ish query and priority sorting
+            # We fetch from get_all and manually sort by priority
+            all_mems = self._store.get_all(user_id=self._user_id, limit=100)
+
+            if not all_mems:
+                return {}
+
+            # Sort by priority (1=highest first), exclude conversation and auto_extract
+            filtered = [
+                m for m in all_mems
+                if m.get("category") not in ("conversation", "auto_extract", "topic_summary")
+            ]
+            filtered.sort(key=lambda m: (
+                {"correction": 0, "instruction": 1, "preference": 2, "decision": 3,
+                 "fact": 4, "goal": 5}.get(m.get("category", ""), 6),
+                m.get("priority", 3),
+            ))
+
+            # Take top N
+            top_mems = filtered[:top_k]
+
+            # Also get recent memories from last 24 hours
+            now = datetime.now(timezone.utc)
+            yesterday = now - timedelta(hours=24)
+            recent = []
+            for m in filtered:
+                updated = m.get("updated_at") or m.get("created_at", "")
+                if updated:
+                    try:
+                        dt = datetime.fromisoformat(updated)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt > yesterday and m["id"] not in {x["id"] for x in top_mems}:
+                            recent.append(m)
+                    except (ValueError, TypeError):
+                        pass
+            recent = recent[:3]
+
+            if not top_mems and not recent:
+                return {}
+
+            lines = ["## Session Context"]
+            if top_mems:
+                lines.append(f"\n### Priority Memories ({len(top_mems)})")
+                for m in top_mems:
+                    cat = m.get("category", "")
+                    pri = m.get("priority", 3)
+                    origin = m.get("origin", "")
+                    meta = f"{cat}"
+                    if pri <= 2:
+                        meta = f"{meta}/P{pri}"
+                    if origin == "user_correction":
+                        meta = f"⚠️{meta}"
+                    lines.append(f"- [{meta}] {m['memory']}")
+
+            if recent:
+                lines.append(f"\n### Recent (24h)")
+                for m in recent:
+                    lines.append(f"- [{m.get('category', '')}] {m['memory']}")
+
+            context = "\n".join(lines)
+            logger.info(
+                "Qdrant session starter: injected %d priority + %d recent memories",
+                len(top_mems), len(recent),
+            )
+            return {"context": context}
+        except Exception as e:
+            logger.debug("Qdrant session starter context failed: %s", e)
             return {}
 
     def on_post_llm_call(self, *, session_id: str = "",
@@ -671,14 +949,19 @@ class QdrantMemoryProvider(MemoryProvider):
 
     def on_session_end_hook(self, *, session_id: str = "",
                             completed: bool = False, interrupted: bool = False,
+                            messages: list | None = None,
                             model: str = "", platform: str = "",
                             **_kwargs) -> None:
-        """on_session_end hook: cleanup only, no data storage.
+        """on_session_end hook: auto-extract key facts + cleanup.
 
+        v0.8.0: Auto-extracts substantive user messages as memories.
         v0.6.1: Disabled storage of "Session ended: <id>" markers.
-        These were polluting search results. Session lifecycle is
-        tracked by the session DB, not Qdrant.
         """
         if interrupted or not session_id:
             return
+
+        # v0.8.0: Auto-extract from messages if provided
+        if messages and self._config and self._config.get("session_end_auto_extract", True):
+            self.on_session_end(messages)
+
         logger.info("Qdrant on_session_end hook: session %s completed", session_id)
