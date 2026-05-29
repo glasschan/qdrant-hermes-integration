@@ -40,7 +40,7 @@ class QdrantStore:
         url = config["qdrant_url"]
         api_key = config.get("qdrant_api_key") or None
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", message="Api key is used with an insecure connection")
+            warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
             self._client = QdrantClient(url=url, api_key=api_key, timeout=10)
         self._config = config
         self._collection = self._ensure_collection()
