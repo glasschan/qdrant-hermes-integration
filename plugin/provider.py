@@ -89,6 +89,12 @@ class QdrantMemoryProvider(MemoryProvider):
             self._store, embed_fn=_efn, learning_store=None
         )
 
+        # Register hooks with the REAL PluginManager (not the _ProviderCollector
+        # stub that silently no-ops register_hook).  The memory provider loading
+        # path uses _ProviderCollector which swallows hook registration, so we
+        # must do it here during initialize() when the real PluginManager exists.
+        self._register_hooks_with_plugin_manager()
+
     def shutdown(self) -> None:
         if self._store:
             try:
@@ -118,6 +124,27 @@ class QdrantMemoryProvider(MemoryProvider):
                 "Qdrant circuit breaker tripped after %d consecutive failures. Pausing for %ds.",
                 self._consecutive_failures, BREAKER_COOLDOWN_SECS,
             )
+
+    def _register_hooks_with_plugin_manager(self) -> None:
+        """Register lifecycle hooks with the real Hermes PluginManager.
+
+        The memory provider loading path (plugins/memory/__init__.py)
+        uses _ProviderCollector, whose register_hook() is a no-op.
+        This method bypasses that by reaching the real PluginManager's
+        internal _hooks dict directly.
+        """
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            pm = get_plugin_manager()
+            pm._hooks.setdefault("pre_llm_call", []).append(self.on_pre_llm_call)
+            pm._hooks.setdefault("post_llm_call", []).append(self.on_post_llm_call)
+            pm._hooks.setdefault("on_session_end", []).append(self.on_session_end_hook)
+            logger.info(
+                "Qdrant: registered 3 hooks with PluginManager "
+                "(pre_llm_call, post_llm_call, on_session_end)"
+            )
+        except Exception as e:
+            logger.warning("Qdrant: failed to register hooks with PluginManager: %s", e)
 
     # ── System prompt ─────────────────────────────────────────────────────
 
@@ -182,24 +209,33 @@ class QdrantMemoryProvider(MemoryProvider):
                 results = self._store.search(
                     query, top_k=top_k, user_id=self._user_id,
                     score_threshold=score_threshold,
+                    category_boost={"conversation": 0.0, "correction": 1.3, "preference": 1.2, "instruction": 1.1},
                 )
                 if results:
-                    lines = []
-                    for r in results:
-                        cat = r.get("category", "")
-                        pri = r.get("priority", 3)
-                        origin = r.get("origin", "")
-                        # Compact format: [category/priority] content (score)
-                        meta = f"{cat}"
-                        if pri <= 2:
-                            meta = f"{meta}/P{pri}"
-                        if origin == "user_correction":
-                            meta = f"⚠️{meta}"
-                        lines.append(
-                            f"- [{meta}] {r['memory']} (score: {r['score']})"
-                        )
-                    with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(lines)
+                    # Post-filter: exclude conversation, apply min score
+                    MIN_SCORE = 0.2
+                    filtered = [
+                        r for r in results
+                        if r.get("category") != "conversation"
+                        and r["score"] >= MIN_SCORE
+                    ]
+                    if filtered:
+                        lines = []
+                        for r in filtered[:top_k]:
+                            cat = r.get("category", "")
+                            pri = r.get("priority", 3)
+                            origin = r.get("origin", "")
+                            # Compact format: [category/priority] content (score)
+                            meta = f"{cat}"
+                            if pri <= 2:
+                                meta = f"{meta}/P{pri}"
+                            if origin == "user_correction":
+                                meta = f"⚠️{meta}"
+                            lines.append(
+                                f"- [{meta}] {r['memory']} (score: {r['score']})"
+                            )
+                        with self._prefetch_lock:
+                            self._prefetch_result = "\n".join(lines)
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -481,43 +517,136 @@ class QdrantMemoryProvider(MemoryProvider):
             logger.debug("on_memory_write mirror failed: %s", e)
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Extract key insights from conversation at session end.
+        """Session-end hook for memory provider interface.
 
-        Stores high-value facts, decisions, and corrections that emerged
-        during the session but weren't explicitly saved.
+        v0.6.1: Disabled auto-extraction of "Session topics" summaries.
+        These were polluting search results with low-value conversation
+        fragments that matched semantically but carried no useful signal.
+        Real valuable memories are stored via explicit qdrant_remember
+        calls (corrections, preferences, decisions).
         """
+        pass
+
+    # ── Hermes hook adapters (v0.6.1) ──────────────────────────────────
+    #
+    # These bridge the Hermes plugin hook system (invoke_hook) to the
+    # Qdrant memory provider's internal methods.  The hook path runs
+    # alongside the memory_manager path — belt-and-suspenders so that
+    # if the memory_manager dispatch silently fails, the hook dispatch
+    # still fires.
+    #
+    # Hook signatures must match what conversation_loop.py passes via
+    # invoke_hook(**kwargs).  Unknown kwargs are absorbed by **_kwargs.
+
+    def on_pre_llm_call(self, *, session_id: str = "",
+                        user_message=None, conversation_history=None,
+                        is_first_turn: bool = False, model: str = "",
+                        platform: str = "", sender_id: str = "",
+                        **_kwargs) -> dict:
+        """pre_llm_call hook: return high-value memories for context injection.
+
+        v0.6.1: Completely independent of prefetch cache. Does a fresh
+        synchronous search and explicitly EXCLUDES conversation category
+        (auto-generated session summaries are noise, not memory).
+        """
+        logger.info(
+            "Qdrant pre_llm_call hook: called (store=%s, breaker=%s, msg_len=%d)",
+            bool(self._store),
+            self._is_breaker_open(),
+            len(user_message) if isinstance(user_message, str) else 0,
+        )
+
         if self._is_breaker_open() or not self._store:
-            return
+            return {}
 
-        if not self._config or not self._config.get("session_end_auto_extract", True):
-            return
+        query = user_message if isinstance(user_message, str) else ""
+        if not query:
+            return {}
 
-        # Only extract from conversations with enough turns
-        user_msgs = [m for m in messages if m.get("role") == "user"]
-        if len(user_msgs) < 3:
+        try:
+            top_k = int(self._config.get("prefetch_top_k", PREFETCH_TOP_K)) if self._config else PREFETCH_TOP_K
+            # Fetch extra so category filtering doesn't starve results
+            results = self._store.search(
+                query, top_k=top_k * 3, user_id=self._user_id,
+                score_threshold=0.0,  # raw pass from Qdrant — we filter below
+                category_boost={
+                    "conversation": 0.0,  # zero = exclude entirely
+                    "correction": 1.3,
+                    "preference": 1.2,
+                    "instruction": 1.1,
+                },
+            )
+            if not results:
+                return {}
+
+            # Post-filter: exclude conversation, apply min score
+            MIN_SCORE = 0.2
+            filtered = [
+                r for r in results
+                if r.get("category") != "conversation"
+                and r["score"] >= MIN_SCORE
+            ]
+
+            if not filtered:
+                logger.info("Qdrant pre_llm_call: all results filtered out (only conversation/low-score)")
+                return {}
+
+            lines = []
+            for r in filtered[:top_k]:
+                cat = r.get("category", "")
+                pri = r.get("priority", 3)
+                origin = r.get("origin", "")
+                meta = f"{cat}"
+                if pri <= 2:
+                    meta = f"{meta}/P{pri}"
+                if origin == "user_correction":
+                    meta = f"⚠️{meta}"
+                lines.append(
+                    f"- [{meta}] {r['memory']} (score: {r['score']})"
+                )
+            context = "## Qdrant Memory\n" + "\n".join(lines)
+            logger.info(
+                "Qdrant pre_llm_call: injected %d results (%d chars, filtered %d)",
+                len(filtered), len(context),
+                len(results) - len(filtered),
+            )
+            return {"context": context}
+        except Exception as e:
+            logger.debug("Qdrant pre_llm_call direct search failed: %s", e)
+            return {}
+
+    def on_post_llm_call(self, *, session_id: str = "",
+                         user_message=None, assistant_response=None,
+                         conversation_history=None, model: str = "",
+                         platform: str = "", **_kwargs) -> None:
+        """post_llm_call hook: sync completed turn to Qdrant.
+
+        Persists the user-assistant exchange and queues a prefetch
+        for the next turn.
+        """
+        user_content = user_message if isinstance(user_message, str) else ""
+        assistant_content = assistant_response if isinstance(assistant_response, str) else ""
+
+        if not user_content or not assistant_content:
             return
 
         try:
-            # Extract last few user messages as session summary
-            # (Full LLM extraction would be too expensive for a hook)
-            recent_user = []
-            for m in user_msgs[-5:]:
-                content = m.get("content", "")
-                if isinstance(content, str) and len(content.strip()) > 20:
-                    recent_user.append(content.strip()[:200])
-
-            if recent_user:
-                summary = "Session topics: " + "; ".join(recent_user[:3])
-                self._store.add(
-                    content=summary,
-                    user_id=self._user_id,
-                    agent_id=self._agent_id,
-                    category="conversation",
-                    priority=5,
-                    origin="auto",
-                    tags=["session-summary"],
-                )
-            self._record_success()
+            self.sync_turn(user_content, assistant_content, session_id=session_id)
+            self.queue_prefetch(user_content, session_id=session_id)
+            logger.info("Qdrant post_llm_call hook: synced turn (user=%d chars)", len(user_content))
         except Exception as e:
-            self._record_failure()
-            logger.debug("on_session_end extraction failed: %s", e)
+            logger.debug("Qdrant post_llm_call hook failed: %s", e)
+
+    def on_session_end_hook(self, *, session_id: str = "",
+                            completed: bool = False, interrupted: bool = False,
+                            model: str = "", platform: str = "",
+                            **_kwargs) -> None:
+        """on_session_end hook: cleanup only, no data storage.
+
+        v0.6.1: Disabled storage of "Session ended: <id>" markers.
+        These were polluting search results. Session lifecycle is
+        tracked by the session DB, not Qdrant.
+        """
+        if interrupted or not session_id:
+            return
+        logger.info("Qdrant on_session_end hook: session %s completed", session_id)

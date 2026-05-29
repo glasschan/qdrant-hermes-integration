@@ -83,5 +83,13 @@ QdrantMemoryProvider = _import_provider()
 
 
 def register(ctx) -> None:
-    """Register the Qdrant memory provider plugin."""
-    ctx.register_memory_provider(QdrantMemoryProvider())
+    """Register the Qdrant memory provider plugin.
+
+    NOTE: ctx here is a _ProviderCollector (from plugins/memory/__init__.py)
+    whose register_hook() is a no-op.  Hooks are registered separately in
+    provider.py's _register_hooks_with_plugin_manager() during initialize(),
+    which bypasses _ProviderCollector and writes to the real PluginManager's
+    _hooks dict directly.
+    """
+    provider = QdrantMemoryProvider()
+    ctx.register_memory_provider(provider)
