@@ -1,6 +1,6 @@
 """QdrantMemoryProvider — main MemoryProvider implementation.
 
-Wires together QdrantStore, FileIndexer, ConsolidationEngine.
+Wires together QdrantStore, FileIndexer, LearningStore, ConsolidationEngine.
 All tool handling lives here. Schema definitions live in schemas.py.
 """
 
@@ -85,7 +85,9 @@ class QdrantMemoryProvider(MemoryProvider):
         _efn = lambda texts: embed(texts, self._config)
 
         self._indexer = FileIndexer(self._store, embed_fn=_efn, config=self._config)
-        self._consolidation = ConsolidationEngine(self._store, embed_fn=_efn)
+        self._consolidation = ConsolidationEngine(
+            self._store, embed_fn=_efn, learning_store=None
+        )
 
         # Register hooks with the REAL PluginManager (not the _ProviderCollector
         # stub that silently no-ops register_hook).  The memory provider loading
@@ -430,6 +432,7 @@ class QdrantMemoryProvider(MemoryProvider):
                 if not self._consolidation:
                     return tool_error("Consolidation engine not initialized")
                 result = self._consolidation.consolidate(
+                    scope=args.get("scope", "memory"),
                     max_points=int(args.get("max_points", 500)),
                     max_groups=int(args.get("max_groups", 20)),
                     include_examples=bool(args.get("include_examples", False)),

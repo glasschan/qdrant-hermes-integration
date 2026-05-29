@@ -22,7 +22,6 @@ from typing import Optional
 
 # localhost Qdrant + API key triggers a benign warning about insecure
 # connection. The traffic never leaves the machine — suppress locally.
-import warnings
 
 from .config import VECTOR_DIM, DEDUP_THRESHOLD, DEDUP_ENABLED
 from .embeddings import embed
