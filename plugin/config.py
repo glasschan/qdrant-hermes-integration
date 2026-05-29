@@ -53,7 +53,7 @@ AUTO_STALE_DAYS = 90             # days before stale check triggers
 AUTO_PRUNE_DAYS = 180            # days before prune check triggers
 
 # Incremental consolidation
-CONSOLIDATION_METADATA_ID = "consolidation_metadata"
+CONSOLIDATION_METADATA_ID = "00000000-0000-0000-0000-000000000001"  # fixed UUID for consolidation metadata
 
 
 def load_config() -> dict:
