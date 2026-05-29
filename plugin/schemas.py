@@ -1,6 +1,10 @@
 """Tool schemas for Qdrant memory plugin.
 
-All 6 tool definitions in one place. Imported by provider.py.
+All tool definitions in one place. Imported by provider.py.
+v0.7.0+: min_priority search filter, evolved_from on remember, quick consolidation,
+         backfill tool.
+v0.8.0+: topics tool.
+v0.9.0+: auto_stale/auto_prune consolidation params.
 """
 
 PROFILE_SCHEMA = {
@@ -31,6 +35,12 @@ SEARCH_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional tags to filter by (AND logic — all must match).",
+            },
+            "min_priority": {
+                "type": "integer",
+                "description": "Minimum priority to include. 1=all (default), 5=only highest quality. Memories with priority > this value are excluded.",
+                "minimum": 1,
+                "maximum": 5,
             },
         },
         "required": ["query"],
@@ -69,6 +79,10 @@ REMEMBER_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional tags for better filtering, e.g. [\"career\", \"salary\"].",
+            },
+            "evolved_from": {
+                "type": "string",
+                "description": "ID of memory this evolved from (set automatically during dedup updates or manual evolution).",
             },
         },
         "required": ["content"],
@@ -126,9 +140,10 @@ INDEX_SCHEMA = {
 CONSOLIDATE_SCHEMA = {
     "name": "qdrant_consolidate",
     "description": (
-        "Generate a read-only memory consolidation report. "
-        "Finds duplicates, stale memories, and quality warnings. "
-        "NEVER mutates data — report-only by design."
+        "Generate a memory consolidation report. "
+        "Finds duplicates, stale memories, quality warnings, and topic clusters. "
+        "Supports quick mode (skip expensive dedup), auto-stale, and auto-prune. "
+        "Quick mode is safe for frequent runs. Auto-prune DELETES data — use with caution."
     ),
     "parameters": {
         "type": "object",
@@ -152,6 +167,73 @@ CONSOLIDATE_SCHEMA = {
                 "type": "boolean",
                 "description": "Include redacted content examples in report.",
             },
+            "quick": {
+                "type": "boolean",
+                "description": "Quick mode: skip expensive duplicate detection, only report stats and stale items (default: false).",
+            },
+            "auto_stale": {
+                "type": "boolean",
+                "description": "Auto-stale: bump stale low-priority memories to priority 5. Requires QDRANT_AUTO_STALE config enabled (default: false).",
+            },
+            "auto_prune": {
+                "type": "boolean",
+                "description": "Auto-prune: DELETE memories with priority 5 older than 180 days. Requires QDRANT_AUTO_PRUNE config enabled (default: false). DANGEROUS — deletes data.",
+            },
+        },
+        "required": [],
+    },
+}
+
+BACKFILL_SCHEMA = {
+    "name": "qdrant_backfill",
+    "description": (
+        "Backfill missing fields on existing memories. "
+        "Scrolls all points and adds default values for fields that are missing. "
+        "Dry-run defaults to true — preview changes before applying."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "defaults": {
+                "type": "object",
+                "description": "Field names and default values to backfill. E.g. {\"priority\": 3, \"origin\": \"auto\"}.",
+                "properties": {
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "origin": {"type": "string"},
+                    "category": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": True,
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "When true (default), preview changes without applying.",
+            },
+        },
+        "required": ["defaults"],
+    },
+}
+
+TOPICS_SCHEMA = {
+    "name": "qdrant_topics",
+    "description": (
+        "List topic clusters discovered from memories. "
+        "Groups semantically similar memories into clusters with auto-generated topic labels."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "min_cluster_size": {
+                "type": "integer",
+                "description": "Minimum memories per cluster to include (default: 2).",
+                "minimum": 2,
+            },
+            "similarity_threshold": {
+                "type": "number",
+                "description": "Cosine similarity threshold for clustering (default: 0.75).",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
         },
         "required": [],
     },
@@ -159,5 +241,5 @@ CONSOLIDATE_SCHEMA = {
 
 # Convenience lists
 CORE_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA]
-EXTENDED_SCHEMAS = [INDEX_SCHEMA, CONSOLIDATE_SCHEMA]
+EXTENDED_SCHEMAS = [INDEX_SCHEMA, CONSOLIDATE_SCHEMA, BACKFILL_SCHEMA, TOPICS_SCHEMA]
 ALL_SCHEMAS = CORE_SCHEMAS + EXTENDED_SCHEMAS
