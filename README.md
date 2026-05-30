@@ -177,12 +177,13 @@ plugin/
 ├── provider.py        # QdrantMemoryProvider — wires everything together
 ├── indexer.py         # FileIndexer — directory indexing + manifest sync
 ├── consolidation.py   # ConsolidationEngine — read-only dedup/stale/quality
+├── clustering.py      # Topic clustering — groups similar memories
 ├── cli.py             # CLI subcommands (status, version, update)
 ├── plugin.yaml        # Hermes plugin metadata + pip deps
 └── VERSION            # Plaintext version
 ```
 
-**~1,900 lines across 9 modules.** Each file self-contained, independently testable. Lego-style — swap any piece without touching the rest.
+**~4,000 lines across 10 modules. 58 unit tests.** Each file self-contained, independently testable. Lego-style — swap any piece without touching the rest.
 
 ---
 
@@ -236,6 +237,7 @@ hermes-qdrant-integration/
 ├── README.md           # ← this file
 ├── SKILL.md            # Full setup guide + troubleshooting
 ├── setup.sh            # One-liner installer (--update, --force flags)
+├── pyproject.toml      # Test config (pytest)
 ├── plugin/
 │   ├── __init__.py     # Self-healing entry point
 │   ├── plugin.yaml     # Hermes plugin metadata
@@ -247,7 +249,14 @@ hermes-qdrant-integration/
 │   ├── provider.py     # MemoryProvider
 │   ├── indexer.py      # File indexing
 │   ├── consolidation.py # Memory consolidation
+│   ├── clustering.py   # Topic clustering
 │   └── cli.py          # CLI subcommands
+├── tests/              # 58 unit tests
+│   ├── conftest.py     # Hermes dependency mocks
+│   ├── test_config.py
+│   ├── test_consolidation.py
+│   ├── test_indexer.py
+│   └── test_store.py
 └── references/         # Architecture docs, security checklist, deployment logs
 ```
 
