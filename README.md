@@ -3,7 +3,7 @@
 > Semantic long-term vector memory for Hermes Agent — local Qdrant + any OpenAI-compatible embedding API.
 > One-minute install. Zero-config auto-scoping. Self-healing.
 
-[![version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/glasschan/qdrant-hermes-integration/releases)
+[![version](https://img.shields.io/badge/version-0.9.2-blue)](https://github.com/glasschan/qdrant-hermes-integration/releases)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---

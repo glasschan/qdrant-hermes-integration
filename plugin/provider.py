@@ -65,6 +65,13 @@ class QdrantMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
+        # Dual circuit breakers (intentionally independent):
+        #   1. embeddings.py EmbeddingCircuitBreaker — tracks embedding API failures
+        #   2. _consecutive_failures / _breaker_open_until below — tracks all Qdrant
+        #      operation failures (scroll, upsert, search, etc.)
+        # Embedding failures do NOT trip the provider breaker, and Qdrant failures
+        # do NOT trip the embedding breaker. This prevents cascade failures where,
+        # e.g., a transient embedding outage would disable all Qdrant reads too.
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
 
@@ -371,13 +378,22 @@ class QdrantMemoryProvider(MemoryProvider):
                 query = args.get("query", "")
                 if not query:
                     return tool_error("Missing required parameter: query")
-                top_k = min(int(args.get("top_k", 10)), 50)
+                try:
+                    top_k = max(1, min(int(args.get("top_k", 10)), 50))
+                except (ValueError, TypeError):
+                    top_k = 10
                 recency_weight = args.get("recency_weight", None)
                 if recency_weight is not None:
-                    recency_weight = float(recency_weight)
+                    try:
+                        recency_weight = float(recency_weight)
+                    except (ValueError, TypeError):
+                        recency_weight = None
                 tags = args.get("tags", None)
                 # v0.7.0: min_priority filter
-                min_priority = int(args.get("min_priority", 1))
+                try:
+                    min_priority = max(1, min(int(args.get("min_priority", 1)), 5))
+                except (ValueError, TypeError):
+                    min_priority = 1
                 results = self._store.search(
                     query, top_k=top_k, user_id=self._user_id,
                     recency_weight=recency_weight, tags=tags,
@@ -408,7 +424,10 @@ class QdrantMemoryProvider(MemoryProvider):
                     return tool_error("Missing required parameter: content")
                 category = args.get("category", "fact")
                 tags = args.get("tags", None)
-                priority = min(max(int(args.get("priority", 3)), 1), 5)
+                try:
+                    priority = min(max(int(args.get("priority", 3)), 1), 5)
+                except (ValueError, TypeError):
+                    priority = 3
                 origin = args.get("origin", "explicit")
                 # v0.7.0: evolved_from parameter
                 evolved_from = args.get("evolved_from", None)
@@ -434,6 +453,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 point_id = args.get("point_id", "")
                 if not point_id:
                     return tool_error("Missing required parameter: point_id")
+                # Validate UUID format
+                import re
+                if not re.match(r'^[0-9a-fA-F\-]{36}$', point_id):
+                    return tool_error("Invalid point_id format — must be UUID")
                 dry_run = args.get("dry_run", True)
                 if dry_run:
                     memory = self._store.get_point(point_id)
@@ -510,8 +533,14 @@ class QdrantMemoryProvider(MemoryProvider):
             elif tool_name == "qdrant_topics":
                 if not self._consolidation:
                     return tool_error("Consolidation engine not initialized")
-                min_cluster_size = int(args.get("min_cluster_size", 2))
-                similarity_threshold = float(args.get("similarity_threshold", 0.75))
+                try:
+                    min_cluster_size = max(2, int(args.get("min_cluster_size", 2)))
+                except (ValueError, TypeError):
+                    min_cluster_size = 2
+                try:
+                    similarity_threshold = max(0.0, min(float(args.get("similarity_threshold", 0.75)), 1.0))
+                except (ValueError, TypeError):
+                    similarity_threshold = 0.75
                 # Fetch points for clustering
                 points = self._store.get_all(user_id=self._user_id, limit=500)
                 if not points:

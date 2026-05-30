@@ -29,6 +29,8 @@ from typing import Optional
 # connection. The traffic never leaves the machine — suppress locally.
 
 from .config import VECTOR_DIM, DEDUP_THRESHOLD, DEDUP_ENABLED
+# embeddings.py only imports from config.py (no circular dependency), so this is safe at top level.
+from .embeddings import embed
 
 logger = logging.getLogger(__name__)
 
@@ -632,22 +634,25 @@ class QdrantStore:
             ts_dt = datetime.fromisoformat(timestamp)
             if ts_dt.tzinfo is None:
                 ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-            ts_int = int(ts_dt.timestamp())
+            # Qdrant stores updated_at as ISO string — use match_text or
+            # compare ISO strings lexicographically with Range on text field.
+            # Since ISO 8601 strings sort lexicographically for same timezone,
+            # we can use a text match condition or just scroll + filter in Python.
+            ts_str = ts_dt.isoformat()
 
+            # Fetch all points and filter in Python (updated_at is ISO string,
+            # Qdrant Range only works on integer/float fields)
             results, _ = self._client.scroll(
                 collection_name=self._collection,
-                scroll_filter=self._models.Filter(
-                    must=[
-                        self._models.FieldCondition(
-                            key="updated_at",
-                            range=self._models.Range(gte=ts_int),
-                        )
-                    ]
-                ),
                 limit=limit,
                 with_payload=True,
                 with_vectors=True,
             )
+            filtered = []
+            for r in results:
+                ua = r.payload.get("updated_at", r.payload.get("created_at", ""))
+                if ua and ua >= ts_str:
+                    filtered.append(r)
             return [
                 {
                     "id": str(r.id),
@@ -664,7 +669,7 @@ class QdrantStore:
                     "evolved_from": r.payload.get("evolved_from", ""),
                     "vector": r.vector,
                 }
-                for r in results
+                for r in filtered
             ]
         except Exception as e:
             logger.warning("get_points_since failed: %s", e)
@@ -688,14 +693,23 @@ class QdrantStore:
             return None
 
     def upsert_metadata_point(self, point_id: str, payload: dict) -> bool:
-        """Upsert a special metadata point (with zero vector placeholder)."""
+        """Upsert a special metadata point.
+
+        Uses a small random unit vector instead of zero-vector to avoid
+        NaN scores in COSINE similarity searches.
+        """
         try:
+            import random, math
+            vec = [random.gauss(0, 1) for _ in range(VECTOR_DIM)]
+            norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+            vec = [v / norm for v in vec]
+            payload["source_type"] = "metadata"  # mark for filtering
             self._client.upsert(
                 collection_name=self._collection,
                 points=[
                     self._models.PointStruct(
                         id=point_id,
-                        vector=[0.0] * VECTOR_DIM,
+                        vector=vec,
                         payload=payload,
                     )
                 ],
@@ -727,5 +741,3 @@ def _completeness_score(point: dict) -> int:
     return score
 
 
-# Late import to avoid circular dependency
-from .embeddings import embed

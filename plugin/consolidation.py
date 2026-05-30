@@ -16,7 +16,6 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
-from qdrant_client.http import models
 
 from .config import (
     CONSOLIDATION_METADATA_ID,
@@ -137,7 +136,8 @@ def _avg_group_similarity(group: list[dict]) -> float:
 # ── ConsolidationEngine ──────────────────────────────────────────────────────
 
 class ConsolidationEngine:
-    """Report-only consolidation. Finds issues, never mutates.
+    """Report-only consolidation. Finds issues, never mutates by default.
+    When auto_stale/auto_prune are enabled, applies lifecycle mutations.
 
     v0.9.0: Supports incremental consolidation, auto-stale, auto-prune.
     """
@@ -182,7 +182,6 @@ class ConsolidationEngine:
 
         proposals = []
         total_scanned = 0
-        lifecycle_result = {}
 
         if scope in ("memory", "both"):
             mem_proposals, mem_scanned = self._scan_collection(
@@ -220,9 +219,7 @@ class ConsolidationEngine:
             "total_proposals": len(proposals),
         }
 
-        if lifecycle_result:
-            result["lifecycle"] = lifecycle_result
-
+        # Lifecycle proposals are in the proposals list, not a separate key
         return result
 
     def _scan_collection(
@@ -348,14 +345,29 @@ class ConsolidationEngine:
     def _fetch_all_points(self, collection_name: str, limit: int) -> list[dict]:
         """Scroll all points from a collection."""
         try:
-            results, _ = self._store.client.scroll(
-                collection_name=collection_name,
-                limit=limit,
-                with_payload=True,
-                with_vectors=True,
-            )
+            all_results = []
+            offset = None
+            page_size = min(limit, 500) if limit > 0 else 500
+
+            while True:
+                results, next_offset = self._store.client.scroll(
+                    collection_name=collection_name,
+                    limit=page_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                all_results.extend(results)
+
+                if not next_offset or not results:
+                    break
+                if limit > 0 and len(all_results) >= limit:
+                    all_results = all_results[:limit]
+                    break
+                offset = next_offset
+
             points = []
-            for r in results:
+            for r in all_results:
                 p = {
                     "id": str(r.id),
                     "content": r.payload.get("content", "") or "",

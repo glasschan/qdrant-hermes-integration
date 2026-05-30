@@ -127,7 +127,16 @@ def _validate_config(config: dict) -> None:
                     )
                     config[key] = default
             except (ValueError, TypeError):
-                logger.warning("Config '%s' is not a valid float: %s", key, val)
+                default = {
+                    "dedup_threshold": DEDUP_THRESHOLD,
+                    "search_recency_weight": SEARCH_RECENCY_WEIGHT,
+                    "prefetch_score_threshold": PREFETCH_SCORE_THRESHOLD,
+                }[key]
+                logger.warning(
+                    "Config '%s' is not a valid float: %s, falling back to %s",
+                    key, val, default,
+                )
+                config[key] = default
 
     # Positive int checks
     for key in ("prefetch_top_k", "prefetch_min_turns", "orphan_age_days",
