@@ -251,13 +251,12 @@ hermes-qdrant-integration/
 │   ├── consolidation.py # Memory consolidation
 │   ├── clustering.py   # Topic clustering
 │   └── cli.py          # CLI subcommands
-├── tests/              # 58 unit tests
-│   ├── conftest.py     # Hermes dependency mocks
-│   ├── test_config.py
-│   ├── test_consolidation.py
-│   ├── test_indexer.py
-│   └── test_store.py
-└── references/         # Architecture docs, security checklist, deployment logs
+└── tests/              # 58 unit tests
+    ├── conftest.py     # Hermes dependency mocks
+    ├── test_config.py
+    ├── test_consolidation.py
+    ├── test_indexer.py
+    └── test_store.py
 ```
 
 ---
